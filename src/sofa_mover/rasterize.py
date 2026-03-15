@@ -3,13 +3,11 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import Tensor
 
-from sofa_mover.corridor import GridConfig, SOFA_CONFIG, TEMPLATE_CONFIG
+from sofa_mover.corridor import SOFA_CONFIG, TEMPLATE_CONFIG, GridConfig, Pose
 
 
 def build_affine_matrix(
-    x: Float[Tensor, " B"],
-    y: Float[Tensor, " B"],
-    theta: Float[Tensor, " B"],
+    pose: Pose,
     sofa_world_size: float,
     template_world_size: float,
 ) -> Float[Tensor, "B 2 3"]:
@@ -25,6 +23,7 @@ def build_affine_matrix(
     With same-resolution grids, the scaling factor s = sofa_world_size / template_world_size.
     """
     s = sofa_world_size / template_world_size
+    x, y, theta = pose.T
     cos_t = torch.cos(theta)
     sin_t = torch.sin(theta)
 
@@ -46,50 +45,146 @@ def build_affine_matrix(
     return affine
 
 
-def get_corridor_mask(
-    template: Float[Tensor, "1 1 Ht Wt"],
-    x: Float[Tensor, " B"],
-    y: Float[Tensor, " B"],
-    theta: Float[Tensor, " B"],
-    sofa_config: GridConfig = SOFA_CONFIG,
-    template_config: GridConfig = TEMPLATE_CONFIG,
-) -> Float[Tensor, "B 1 Hs Ws"]:
-    """Compute corridor mask on the sofa grid for a batch of corridor poses.
+class Rasterizer:
+    """Transforms a pre-rasterized corridor template onto the sofa grid.
 
-    Uses affine_grid + grid_sample to efficiently transform the pre-rasterized
-    corridor template onto each sofa grid.
-
-    Args:
-        template: Pre-rasterized corridor template (1, 1, Ht, Wt).
-        x, y, theta: Batch of corridor poses (B,).
-        sofa_config: Grid config for the sofa grid (output).
-        template_config: Grid config for the corridor template (input).
-
-    Returns:
-        Binary corridor mask (B, 1, Hs, Ws). 1.0 = passable, 0.0 = wall.
+    Holds the corridor template and grid configs. Provides corridor_mask (single
+    pose) and swept_mask (interpolated between two poses).
     """
-    batch_size = x.shape[0]
-    device = template.device
-    x, y, theta = x.to(device), y.to(device), theta.to(device)
-    affine = build_affine_matrix(
-        x, y, theta, sofa_config.world_size, template_config.world_size
-    )
 
-    grid = F.affine_grid(
-        affine,
-        [batch_size, 1, sofa_config.grid_size, sofa_config.grid_size],
-        align_corners=False,
-    )
+    def __init__(
+        self,
+        template: Float[Tensor, "1 1 Ht Wt"],
+        sofa_config: GridConfig = SOFA_CONFIG,
+        template_config: GridConfig = TEMPLATE_CONFIG,
+    ) -> None:
+        self.template = template
+        self.sofa_config = sofa_config
+        self.template_config = template_config
 
-    # Expand template to batch size
-    template_batch = template.expand(batch_size, -1, -1, -1)
+    def corridor_mask(self, pose: Pose) -> Float[Tensor, "B 1 Hs Ws"]:
+        """Compute corridor mask on the sofa grid for a batch of corridor poses.
 
-    mask = F.grid_sample(
-        template_batch,
-        grid,
-        mode="nearest",
-        padding_mode="zeros",
-        align_corners=False,
-    )
+        Uses affine_grid + grid_sample to efficiently transform the pre-rasterized
+        corridor template onto each sofa grid.
 
-    return mask
+        Args:
+            pose: Batch of corridor poses (B, 3) — columns are x, y, theta.
+
+        Returns:
+            Binary corridor mask (B, 1, Hs, Ws). 1.0 = passable, 0.0 = wall.
+        """
+        batch_size = pose.shape[0]
+        affine = build_affine_matrix(
+            pose, self.sofa_config.world_size, self.template_config.world_size
+        )
+
+        grid = F.affine_grid(
+            affine,
+            [batch_size, 1, self.sofa_config.grid_size, self.sofa_config.grid_size],
+            align_corners=False,
+        )
+
+        template_batch = self.template.expand(batch_size, -1, -1, -1)
+
+        mask = F.grid_sample(
+            template_batch,
+            grid,
+            mode="nearest",
+            padding_mode="zeros",
+            align_corners=False,
+        )
+
+        return mask
+
+    def swept_mask(
+        self,
+        pose_prev: Pose,
+        pose_next: Pose,
+        num_substeps: int,
+    ) -> Float[Tensor, "B 1 Hs Ws"]:
+        """Compute the swept corridor mask between two poses (fused).
+
+        Samples num_substeps intermediate poses (excluding the previous, including
+        the next) via linear interpolation, computes all corridor masks in a single
+        batched grid_sample call, and returns their element-wise minimum.
+
+        A sofa pixel survives only if it is inside the corridor at every
+        intermediate position. With num_substeps=1, this is equivalent to
+        corridor_mask at the next pose.
+
+        Uses a single grid_sample with batch size B*K (K=num_substeps) for better
+        GPU utilization. See _swept_mask_loop for a memory-lighter alternative that
+        processes substeps sequentially.
+        """
+        if num_substeps < 1:
+            raise ValueError(f"num_substeps must be >= 1, got {num_substeps}")
+
+        B = pose_prev.shape[0]
+        device = pose_prev.device
+
+        # t values: exclude 0 (previous pose already applied), include 1 (target)
+        t_values = torch.linspace(0.0, 1.0, num_substeps + 1, device=device)[1:]  # (K,)
+
+        delta = pose_next - pose_prev  # (B, 3)
+
+        # Build all interpolated poses: (K, B, 3) → (K*B, 3)
+        all_poses = pose_prev.unsqueeze(0) + t_values[:, None, None] * delta.unsqueeze(
+            0
+        )  # (K, B, 3)
+        all_poses_flat = all_poses.reshape(-1, 3)  # (K*B, 3)
+
+        # Single batched corridor_mask call
+        affine = build_affine_matrix(
+            all_poses_flat, self.sofa_config.world_size, self.template_config.world_size
+        )
+        KB = all_poses_flat.shape[0]
+        H, W = self.sofa_config.grid_size, self.sofa_config.grid_size
+
+        grid = F.affine_grid(affine, [KB, 1, H, W], align_corners=False)
+        template_batch = self.template.expand(KB, -1, -1, -1)
+        masks_flat = F.grid_sample(
+            template_batch,
+            grid,
+            mode="nearest",
+            padding_mode="zeros",
+            align_corners=False,
+        )  # (K*B, 1, H, W)
+
+        # Reshape and take intersection (min) across substeps
+        masks = masks_flat.reshape(num_substeps, B, 1, H, W)
+        swept, _ = masks.min(dim=0)  # (B, 1, H, W)
+        return swept
+
+    def _swept_mask_loop(
+        self,
+        pose_prev: Pose,
+        pose_next: Pose,
+        num_substeps: int,
+    ) -> Float[Tensor, "B 1 Hs Ws"]:
+        """Compute swept corridor mask using a sequential loop over substeps.
+
+        Lighter on memory than the fused swept_mask (allocates one mask at a time
+        instead of K masks simultaneously), but slower at low batch numbers due to K sequential
+        kernel launches. roughly same speed as other method.
+        """
+        if num_substeps < 1:
+            raise ValueError(f"num_substeps must be >= 1, got {num_substeps}")
+
+        device = pose_prev.device
+        t_values = torch.linspace(0.0, 1.0, num_substeps + 1, device=device)[1:]
+        delta = pose_next - pose_prev
+
+        swept: Tensor | None = None
+
+        for t in t_values:
+            pose_t = pose_prev + t * delta
+            mask_t = self.corridor_mask(pose_t)
+
+            if swept is None:
+                swept = mask_t
+            else:
+                torch.min(swept, mask_t, out=swept)
+
+        assert swept is not None
+        return swept

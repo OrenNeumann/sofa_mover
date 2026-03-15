@@ -2,32 +2,25 @@ import math
 
 import torch
 
-from sofa_mover.corridor import GridConfig, make_l_corridor
+from sofa_mover.corridor import GridConfig
 from sofa_mover.erosion import erode
-from sofa_mover.rasterize import get_corridor_mask
+from sofa_mover.rasterize import Rasterizer
 
 
 def _make_sofa(
-    config: GridConfig, batch_size: int = 1, device: str = "cuda"
+    config: GridConfig, batch_size: int = 1, device: torch.device = torch.device("cuda")
 ) -> torch.Tensor:
     """Create a full (all-ones) sofa grid."""
     return torch.ones(batch_size, 1, config.grid_size, config.grid_size, device=device)
 
 
 def test_no_erosion_when_fully_inside(
-    sofa_config: GridConfig, template_config: GridConfig
+    rasterizer: Rasterizer, sofa_config: GridConfig
 ) -> None:
     """If the sofa is fully inside the corridor mask, no erosion occurs."""
-    template = make_l_corridor(config=template_config)
-    # Use a small sofa that fits entirely within the corridor at identity pose
-    sofa = _make_sofa(sofa_config)
-    mask = get_corridor_mask(
-        template,
-        torch.zeros(1),
-        torch.zeros(1),
-        torch.zeros(1),
-        sofa_config,
-        template_config,
+    sofa = _make_sofa(sofa_config, device=rasterizer.template.device)
+    mask = rasterizer.corridor_mask(
+        torch.tensor([[0.0, 0.0, 0.0]], device=rasterizer.template.device)
     )
     # Only keep pixels that are inside the corridor
     sofa_inside = sofa * mask
@@ -36,17 +29,11 @@ def test_no_erosion_when_fully_inside(
     assert torch.equal(result, sofa_inside)
 
 
-def test_partial_erosion(sofa_config: GridConfig, template_config: GridConfig) -> None:
+def test_partial_erosion(rasterizer: Rasterizer, sofa_config: GridConfig) -> None:
     """Erosion with a partial mask reduces area."""
-    sofa = _make_sofa(sofa_config)
-    template = make_l_corridor(config=template_config)
-    mask = get_corridor_mask(
-        template,
-        torch.zeros(1),
-        torch.zeros(1),
-        torch.zeros(1),
-        sofa_config,
-        template_config,
+    sofa = _make_sofa(sofa_config, device=rasterizer.template.device)
+    mask = rasterizer.corridor_mask(
+        torch.tensor([[0.0, 0.0, 0.0]], device=rasterizer.template.device)
     )
     # The mask doesn't cover the full sofa grid, so erosion removes pixels
     area_before = sofa.sum().item()
@@ -64,30 +51,21 @@ def test_full_erosion_with_empty_mask(sofa_config: GridConfig) -> None:
     assert result.sum().item() == 0.0
 
 
-def test_cumulative_erosion(
-    sofa_config: GridConfig, template_config: GridConfig
-) -> None:
+def test_cumulative_erosion(rasterizer: Rasterizer, sofa_config: GridConfig) -> None:
     """Multiple erosion steps with different poses yield monotonically decreasing area."""
-    template = make_l_corridor(config=template_config)
-    sofa = _make_sofa(sofa_config)
+    d = rasterizer.template.device
+    sofa = _make_sofa(sofa_config, device=d)
 
     poses = [
-        (0.0, 0.0, 0.0),
-        (0.3, 0.0, 0.0),
-        (0.3, 0.0, math.pi / 6),
-        (0.5, -0.2, math.pi / 4),
+        [0.0, 0.0, 0.0],
+        [0.3, 0.0, 0.0],
+        [0.3, 0.0, math.pi / 6],
+        [0.5, -0.2, math.pi / 4],
     ]
 
     areas = [sofa.sum().item()]
-    for px, py, pt in poses:
-        mask = get_corridor_mask(
-            template,
-            torch.tensor([px]),
-            torch.tensor([py]),
-            torch.tensor([pt]),
-            sofa_config,
-            template_config,
-        )
+    for pose_vals in poses:
+        mask = rasterizer.corridor_mask(torch.tensor([pose_vals], device=d))
         sofa = erode(sofa, mask)
         areas.append(sofa.sum().item())
 
@@ -98,36 +76,33 @@ def test_cumulative_erosion(
     assert areas[-1] < areas[0]
 
 
-def test_erosion_idempotent(
-    sofa_config: GridConfig, template_config: GridConfig
-) -> None:
+def test_erosion_idempotent(rasterizer: Rasterizer) -> None:
     """Applying the same mask twice doesn't change the result after the first application."""
-    template = make_l_corridor(config=template_config)
-    sofa = _make_sofa(sofa_config)
-    mask = get_corridor_mask(
-        template,
-        torch.tensor([0.2]),
-        torch.tensor([-0.1]),
-        torch.tensor([0.3]),
-        sofa_config,
-        template_config,
-    )
+    d = rasterizer.template.device
+    sofa = _make_sofa(rasterizer.sofa_config, device=d)
+    mask = rasterizer.corridor_mask(torch.tensor([[0.2, -0.1, 0.3]], device=d))
     once = erode(sofa, mask)
     twice = erode(once, mask)
     assert torch.equal(once, twice)
 
 
-def test_erosion_batched(sofa_config: GridConfig, template_config: GridConfig) -> None:
+def test_erosion_batched(rasterizer: Rasterizer, sofa_config: GridConfig) -> None:
     """Erosion works correctly with batched inputs."""
-    template = make_l_corridor(config=template_config)
+    d = rasterizer.template.device
     batch_size = 4
-    sofa = _make_sofa(sofa_config, batch_size=batch_size)
+    sofa = _make_sofa(sofa_config, batch_size=batch_size, device=d)
 
-    x = torch.tensor([0.0, 0.3, -0.2, 0.5])
-    y = torch.tensor([0.0, 0.0, 0.1, -0.3])
-    theta = torch.tensor([0.0, 0.2, -0.1, 0.4])
+    pose = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [0.3, 0.0, 0.2],
+            [-0.2, 0.1, -0.1],
+            [0.5, -0.3, 0.4],
+        ],
+        device=d,
+    )
 
-    masks = get_corridor_mask(template, x, y, theta, sofa_config, template_config)
+    masks = rasterizer.corridor_mask(pose)
     result = erode(sofa, masks)
 
     # Each batch element should have different area (different poses)
@@ -136,34 +111,23 @@ def test_erosion_batched(sofa_config: GridConfig, template_config: GridConfig) -
 
 
 def test_l_corridor_walkthrough(
-    sofa_config: GridConfig, template_config: GridConfig
+    rasterizer: Rasterizer, sofa_config: GridConfig
 ) -> None:
     """Simulate a sofa passing through an L-corridor: translate, rotate, translate."""
-    template = make_l_corridor(config=template_config)
-    sofa = _make_sofa(sofa_config)
+    d = rasterizer.template.device
+    sofa = _make_sofa(sofa_config, device=d)
 
-    # Start: corridor at reference position
-    # Step 1: move corridor down (sofa enters vertical leg)
-    # Step 2-3: rotate corridor (sofa navigates the corner)
-    # Step 4: move corridor left (sofa exits through horizontal leg)
     trajectory = [
-        (0.0, 0.0, 0.0),
-        (0.0, -0.5, 0.0),
-        (0.0, -0.5, math.pi / 8),
-        (0.0, -0.5, math.pi / 4),
-        (-0.5, -0.5, math.pi / 4),
+        [0.0, 0.0, 0.0],
+        [0.0, -0.5, 0.0],
+        [0.0, -0.5, math.pi / 8],
+        [0.0, -0.5, math.pi / 4],
+        [-0.5, -0.5, math.pi / 4],
     ]
 
     areas = []
-    for px, py, pt in trajectory:
-        mask = get_corridor_mask(
-            template,
-            torch.tensor([px]),
-            torch.tensor([py]),
-            torch.tensor([pt]),
-            sofa_config,
-            template_config,
-        )
+    for pose_vals in trajectory:
+        mask = rasterizer.corridor_mask(torch.tensor([pose_vals], device=d))
         sofa = erode(sofa, mask)
         areas.append(sofa.sum().item())
 

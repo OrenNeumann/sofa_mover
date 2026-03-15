@@ -10,12 +10,13 @@ from sofa_mover.corridor import (
     SOFA_CONFIG,
     TEMPLATE_CONFIG,
 )
-from sofa_mover.rasterize import get_corridor_mask
+from sofa_mover.rasterize import Rasterizer
 from sofa_mover.erosion import erode
 
 
 def main() -> None:
     template = make_l_corridor(config=TEMPLATE_CONFIG)
+    rasterizer = Rasterizer(template, SOFA_CONFIG, TEMPLATE_CONFIG)
     sofa = torch.ones(1, 1, SOFA_CONFIG.grid_size, SOFA_CONFIG.grid_size)
 
     # --- Figure 1: Corridor template ---
@@ -38,14 +39,7 @@ def main() -> None:
     axes[0].set_aspect("equal")
 
     # --- Figure 2: Mask at identity pose ---
-    mask_identity = get_corridor_mask(
-        template,
-        torch.zeros(1),
-        torch.zeros(1),
-        torch.zeros(1),
-        SOFA_CONFIG,
-        TEMPLATE_CONFIG,
-    )
+    mask_identity = rasterizer.corridor_mask(torch.tensor([[0.0, 0.0, 0.0]]))
     axes[1].imshow(
         mask_identity[0, 0].numpy(),
         origin="lower",
@@ -63,14 +57,7 @@ def main() -> None:
     axes[1].set_aspect("equal")
 
     # --- Figure 3: Mask at rotated pose ---
-    mask_rotated = get_corridor_mask(
-        template,
-        torch.tensor([0.0]),
-        torch.tensor([0.0]),
-        torch.tensor([math.pi / 4]),
-        SOFA_CONFIG,
-        TEMPLATE_CONFIG,
-    )
+    mask_rotated = rasterizer.corridor_mask(torch.tensor([[0.0, 0.0, math.pi / 4]]))
     axes[2].imshow(
         mask_rotated[0, 0].numpy(),
         origin="lower",
@@ -93,12 +80,12 @@ def main() -> None:
 
     # --- Figure 2: Erosion walkthrough ---
     trajectory = [
-        (0.0, 0.0, 0.0),
-        (0.0, -0.3, 0.0),
-        (0.0, -0.5, math.pi / 8),
-        (0.0, -0.5, math.pi / 4),
-        (-0.3, -0.5, math.pi / 4),
-        (-0.5, -0.5, math.pi / 3),
+        [0.0, 0.0, 0.0],
+        [0.0, -0.3, 0.0],
+        [0.0, -0.5, math.pi / 8],
+        [0.0, -0.5, math.pi / 4],
+        [-0.3, -0.5, math.pi / 4],
+        [-0.5, -0.5, math.pi / 3],
     ]
 
     fig2, axes2 = plt.subplots(2, 3, figsize=(15, 10))
@@ -110,19 +97,13 @@ def main() -> None:
         SOFA_CONFIG.world_size / 2,
     ]
 
-    for i, (px, py, pt) in enumerate(trajectory):
-        mask = get_corridor_mask(
-            template,
-            torch.tensor([px]),
-            torch.tensor([py]),
-            torch.tensor([pt]),
-            SOFA_CONFIG,
-            TEMPLATE_CONFIG,
-        )
+    for i, pose_vals in enumerate(trajectory):
+        mask = rasterizer.corridor_mask(torch.tensor([pose_vals]))
         sofa = erode(sofa, mask)
         area_pixels = sofa.sum().item()
         area_world = area_pixels * (SOFA_CONFIG.world_size / SOFA_CONFIG.grid_size) ** 2
 
+        px, py, pt = pose_vals
         axes2[i].imshow(sofa[0, 0].numpy(), origin="lower", extent=extent, cmap="Blues")
         axes2[i].set_title(
             f"Step {i}: pose=({px:.1f}, {py:.1f}, {pt:.2f})\narea={area_world:.2f}"

@@ -2,26 +2,27 @@ import math
 
 import torch
 
-from sofa_mover.corridor import GridConfig, make_l_corridor
-from sofa_mover.rasterize import get_corridor_mask
+from sofa_mover.corridor import GridConfig
+from sofa_mover.rasterize import Rasterizer
 
 
-def _make_poses(
-    x: float, y: float, theta: float, batch_size: int = 1
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Helper to create single-element pose tensors."""
+def _make_pose(
+    x: float,
+    y: float,
+    theta: float,
+    batch_size: int = 1,
+    device: torch.device = torch.device("cuda"),
+) -> torch.Tensor:
+    """Helper to create a (B, 3) pose tensor."""
     return (
-        torch.full((batch_size,), x),
-        torch.full((batch_size,), y),
-        torch.full((batch_size,), theta),
+        torch.tensor([[x, y, theta]], device=device).expand(batch_size, -1).contiguous()
     )
 
 
-def test_identity_pose(sofa_config: GridConfig, template_config: GridConfig) -> None:
+def test_identity_pose(rasterizer: Rasterizer, sofa_config: GridConfig) -> None:
     """At pose (0,0,0), the sofa grid should see the center of the template."""
-    template = make_l_corridor(config=template_config)
-    x, y, theta = _make_poses(0.0, 0.0, 0.0)
-    mask = get_corridor_mask(template, x, y, theta, sofa_config, template_config)
+    pose = _make_pose(0.0, 0.0, 0.0, device=rasterizer.template.device)
+    mask = rasterizer.corridor_mask(pose)
 
     assert mask.shape == (1, 1, sofa_config.grid_size, sofa_config.grid_size)
     # The sofa grid (world_size=3.0) views the center 3x3 of the template (world_size=6.0).
@@ -32,12 +33,11 @@ def test_identity_pose(sofa_config: GridConfig, template_config: GridConfig) -> 
 
 
 def test_identity_pose_center_is_passable(
-    sofa_config: GridConfig, template_config: GridConfig
+    rasterizer: Rasterizer, sofa_config: GridConfig
 ) -> None:
     """The center of the sofa grid (world origin) should map to the corridor corner."""
-    template = make_l_corridor(config=template_config)
-    x, y, theta = _make_poses(0.0, 0.0, 0.0)
-    mask = get_corridor_mask(template, x, y, theta, sofa_config, template_config)
+    pose = _make_pose(0.0, 0.0, 0.0, device=rasterizer.template.device)
+    mask = rasterizer.corridor_mask(pose)
 
     # The origin is at the corner of the L-corridor.
     # Pixel just below and to the left of center should be inside the vertical leg.
@@ -47,18 +47,12 @@ def test_identity_pose_center_is_passable(
     assert mask[0, 0, center - offset, center - offset].item() == 1.0
 
 
-def test_translation_shifts_mask(
-    sofa_config: GridConfig, template_config: GridConfig
-) -> None:
+def test_translation_shifts_mask(rasterizer: Rasterizer) -> None:
     """Translating the corridor should shift the visible mask."""
-    template = make_l_corridor(config=template_config)
-    mask_0 = get_corridor_mask(
-        template, *_make_poses(0.0, 0.0, 0.0), sofa_config, template_config
-    )
+    d = rasterizer.template.device
+    mask_0 = rasterizer.corridor_mask(_make_pose(0.0, 0.0, 0.0, device=d))
     # Shift corridor to the right by 0.5 world units
-    mask_shifted = get_corridor_mask(
-        template, *_make_poses(0.5, 0.0, 0.0), sofa_config, template_config
-    )
+    mask_shifted = rasterizer.corridor_mask(_make_pose(0.5, 0.0, 0.0, device=d))
     # The masks should be different
     assert not torch.equal(mask_0, mask_shifted)
     # Shifting corridor right (x=+0.5) means sofa views a region shifted left
@@ -67,20 +61,11 @@ def test_translation_shifts_mask(
     assert mask_shifted.sum() < mask_0.sum()
 
 
-def test_rotation_90_degrees(
-    sofa_config: GridConfig, template_config: GridConfig
-) -> None:
+def test_rotation_90_degrees(rasterizer: Rasterizer) -> None:
     """Rotating the corridor 90 degrees should produce a different mask."""
-    template = make_l_corridor(config=template_config)
-    mask_0 = get_corridor_mask(
-        template, *_make_poses(0.0, 0.0, 0.0), sofa_config, template_config
-    )
-    mask_90 = get_corridor_mask(
-        template,
-        *_make_poses(0.0, 0.0, math.pi / 2),
-        sofa_config,
-        template_config,
-    )
+    d = rasterizer.template.device
+    mask_0 = rasterizer.corridor_mask(_make_pose(0.0, 0.0, 0.0, device=d))
+    mask_90 = rasterizer.corridor_mask(_make_pose(0.0, 0.0, math.pi / 2, device=d))
     assert not torch.equal(mask_0, mask_90)
     # Both should have approximately the same total passable area
     # (rotation preserves area), within rasterization tolerance
@@ -89,53 +74,38 @@ def test_rotation_90_degrees(
     assert abs(area_0 - area_90) / max(area_0, area_90) < 0.05
 
 
-def test_large_translation_gives_empty_mask(
-    sofa_config: GridConfig, template_config: GridConfig
-) -> None:
+def test_large_translation_gives_empty_mask(rasterizer: Rasterizer) -> None:
     """Corridor translated far away should produce all-zero mask."""
-    template = make_l_corridor(config=template_config)
-    # Shift corridor way beyond the sofa grid view
-    mask = get_corridor_mask(
-        template, *_make_poses(10.0, 10.0, 0.0), sofa_config, template_config
+    mask = rasterizer.corridor_mask(
+        _make_pose(10.0, 10.0, 0.0, device=rasterizer.template.device)
     )
     assert mask.sum().item() == 0.0
 
 
-def test_batch_identical_poses(
-    sofa_config: GridConfig, template_config: GridConfig
-) -> None:
+def test_batch_identical_poses(rasterizer: Rasterizer) -> None:
     """Batch of identical poses should produce identical masks."""
-    template = make_l_corridor(config=template_config)
-    x, y, theta = _make_poses(0.3, -0.2, 0.1, batch_size=4)
-    masks = get_corridor_mask(template, x, y, theta, sofa_config, template_config)
+    pose = _make_pose(0.3, -0.2, 0.1, batch_size=4, device=rasterizer.template.device)
+    masks = rasterizer.corridor_mask(pose)
 
     assert masks.shape[0] == 4
     for i in range(1, 4):
         assert torch.equal(masks[0], masks[i])
 
 
-def test_batch_different_poses(
-    sofa_config: GridConfig, template_config: GridConfig
-) -> None:
+def test_batch_different_poses(rasterizer: Rasterizer) -> None:
     """Batched results should match individual results."""
-    template = make_l_corridor(config=template_config)
-    poses = [(0.0, 0.0, 0.0), (0.5, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.5)]
+    d = rasterizer.template.device
+    poses_list = [(0.0, 0.0, 0.0), (0.5, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.5)]
 
     # Run individually
     individual_masks = []
-    for px, py, pt in poses:
-        mask = get_corridor_mask(
-            template, *_make_poses(px, py, pt), sofa_config, template_config
-        )
+    for px, py, pt in poses_list:
+        mask = rasterizer.corridor_mask(_make_pose(px, py, pt, device=d))
         individual_masks.append(mask)
 
     # Run batched
-    x = torch.tensor([p[0] for p in poses])
-    y = torch.tensor([p[1] for p in poses])
-    theta = torch.tensor([p[2] for p in poses])
-    batched_masks = get_corridor_mask(
-        template, x, y, theta, sofa_config, template_config
-    )
+    pose = torch.tensor(poses_list, device=d)
+    batched_masks = rasterizer.corridor_mask(pose)
 
-    for i in range(len(poses)):
+    for i in range(len(poses_list)):
         assert torch.equal(batched_masks[i], individual_masks[i][0])

@@ -1,8 +1,12 @@
 from dataclasses import dataclass
+from typing import TypeAlias
 
 import torch
 from jaxtyping import Float
 from torch import Tensor
+
+# Pose tensor, (batch_size, [x, y, theta])
+Pose: TypeAlias = Float[Tensor, "B 3"]
 
 
 @dataclass(frozen=True)
