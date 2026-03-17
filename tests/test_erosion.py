@@ -2,13 +2,15 @@ import math
 
 import torch
 
-from sofa_mover.corridor import GridConfig
+from sofa_mover.corridor import DEVICE, GridConfig
 from sofa_mover.erosion import erode
 from sofa_mover.rasterize import Rasterizer
 
 
 def _make_sofa(
-    config: GridConfig, batch_size: int = 1, device: torch.device = torch.device("cuda")
+    config: GridConfig,
+    batch_size: int = 1,
+    device: torch.device = DEVICE,
 ) -> torch.Tensor:
     """Create a full (all-ones) sofa grid."""
     return torch.ones(batch_size, 1, config.grid_size, config.grid_size, device=device)

@@ -1,6 +1,6 @@
 import pytest
 import torch
-from sofa_mover.corridor import GridConfig, make_l_corridor
+from sofa_mover.corridor import DEVICE, GridConfig, make_l_corridor
 from sofa_mover.rasterize import Rasterizer
 
 
@@ -16,7 +16,7 @@ def template_config() -> GridConfig:
 
 @pytest.fixture
 def device() -> torch.device:
-    return torch.device("cuda")
+    return DEVICE
 
 
 @pytest.fixture

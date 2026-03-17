@@ -26,6 +26,7 @@ class GridConfig:
 
 
 # Default configs
+DEVICE = torch.device("cuda")
 SOFA_CONFIG = GridConfig(grid_size=256, world_size=3.0)
 TEMPLATE_CONFIG = GridConfig(grid_size=256, world_size=6.0)
 
@@ -33,7 +34,7 @@ TEMPLATE_CONFIG = GridConfig(grid_size=256, world_size=6.0)
 def make_l_corridor(
     config: GridConfig = TEMPLATE_CONFIG,
     corridor_width: float = 1.0,
-    device: torch.device = torch.device("cuda"),
+    device: torch.device = DEVICE,
 ) -> Float[Tensor, "1 1 H W"]:
     """Create a binary template for an L-shaped corridor.
 
