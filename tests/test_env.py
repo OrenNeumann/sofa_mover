@@ -1,0 +1,165 @@
+"""Tests for the SofaEnv TorchRL environment."""
+
+import math
+
+import torch
+import pytest
+
+from sofa_mover.corridor import GridConfig
+from sofa_mover.env import SofaEnvConfig, make_sofa_env
+
+
+# Use small grids + CPU for fast tests
+TEST_DEVICE = torch.device("cpu")
+TEST_SOFA = GridConfig(grid_size=32, world_size=3.0)
+TEST_TEMPLATE = GridConfig(grid_size=32, world_size=6.0)
+NUM_ENVS = 2
+H = TEST_SOFA.grid_size
+
+
+def _test_cfg(**overrides) -> SofaEnvConfig:
+    defaults = dict(
+        sofa_config=TEST_SOFA,
+        template_config=TEST_TEMPLATE,
+        max_steps=20,
+    )
+    defaults.update(overrides)
+    return SofaEnvConfig(**defaults)  # type: ignore[arg-type]
+
+
+@pytest.fixture(scope="module")
+def env():
+    """Shared env instance — small grid on CPU for speed."""
+    return make_sofa_env(num_envs=NUM_ENVS, cfg=_test_cfg(), device=TEST_DEVICE)
+
+
+def _noop_action(B: int) -> torch.Tensor:
+    """Action index 13 = center of 3x3x3: (dx=0, dy=0, dtheta=0)."""
+    action = torch.zeros(B, 27, device=TEST_DEVICE)
+    action[:, 13] = 1.0
+    return action
+
+
+def _random_action(B: int) -> torch.Tensor:
+    action = torch.zeros(B, 27, device=TEST_DEVICE)
+    idx = torch.randint(0, 27, (B,))
+    action.scatter_(1, idx.unsqueeze(1), 1.0)
+    return action
+
+
+class TestReset:
+    def test_shapes(self, env) -> None:
+        td = env.reset()
+        assert td["observation"].shape == (NUM_ENVS, 2, H, H)
+        assert td["progress"].shape == (NUM_ENVS, 1)
+        assert td["done"].shape == (NUM_ENVS, 1)
+
+    def test_sofa_is_carved(self, env) -> None:
+        env.reset()
+        sofa = env._sofa
+        assert sofa.sum() < sofa.numel()
+        assert sofa.sum() > 0
+
+    def test_initial_progress_zero(self, env) -> None:
+        td = env.reset()
+        assert torch.allclose(
+            td["progress"], torch.zeros_like(td["progress"]), atol=1e-5
+        )
+
+    def test_initial_pose(self, env) -> None:
+        env.reset()
+        expected = torch.tensor([list(env.cfg.initial_pose)], device=TEST_DEVICE)
+        assert torch.allclose(env._pose, expected.expand(NUM_ENVS, -1))
+
+    def test_observation_two_channels_binary(self, env) -> None:
+        td = env.reset()
+        obs = td["observation"]
+        assert obs[:, 0:1].min() >= 0.0 and obs[:, 0:1].max() <= 1.0
+        assert obs[:, 1:2].min() >= 0.0 and obs[:, 1:2].max() <= 1.0
+
+
+class TestStep:
+    def test_step_shapes(self, env) -> None:
+        td = env.reset()
+        td["action"] = _noop_action(NUM_ENVS)
+        td_next = env.step(td)["next"]
+        assert td_next["observation"].shape == (NUM_ENVS, 2, H, H)
+        assert td_next["reward"].shape == (NUM_ENVS, 1)
+        assert td_next["done"].shape == (NUM_ENVS, 1)
+        assert td_next["terminated"].shape == (NUM_ENVS, 1)
+
+    def test_noop_preserves_area(self, env) -> None:
+        td = env.reset()
+        area_before = env._sofa.sum().item()
+        td["action"] = _noop_action(NUM_ENVS)
+        env.step(td)
+        area_after = env._sofa.sum().item()
+        assert area_after == pytest.approx(area_before, rel=1e-5)
+
+    def test_area_monotonically_decreases(self, env) -> None:
+        td = env.reset()
+        prev_area = env._sofa.sum().item()
+        for _ in range(5):
+            td["action"] = _random_action(NUM_ENVS)
+            td = env.step(td)["next"]
+            area = env._sofa.sum().item()
+            assert area <= prev_area + 1e-5
+            prev_area = area
+
+    def test_truncation_at_max_steps(self, env) -> None:
+        td = env.reset()
+        for _ in range(env.cfg.max_steps):
+            td["action"] = _noop_action(NUM_ENVS)
+            td = env.step(td)["next"]
+        assert td["done"].all()
+        assert td["truncated"].all()
+
+    def test_noop_gives_zero_reward(self, env) -> None:
+        """Standing still: no erosion, no terminal bonus."""
+        td = env.reset()
+        td["action"] = _noop_action(NUM_ENVS)
+        td_next = env.step(td)["next"]
+        assert (td_next["reward"].abs() < 0.01).all()
+
+
+class TestGoalDetection:
+    def test_goal_reachable_with_large_steps(self) -> None:
+        """With very large deltas, the agent can reach done (goal or area death)."""
+        cfg = _test_cfg(
+            delta_xy=0.5,
+            delta_theta=math.pi / 4,
+            max_steps=100,
+            goal_radius=0.5,
+        )
+        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        td = env.reset()
+        for _ in range(100):
+            # dx=0, dy=-d, dt=+d  →  index = 1*9 + 0*3 + 2 = 11
+            action = torch.zeros(1, 27, device=TEST_DEVICE)
+            action[0, 11] = 1.0
+            td["action"] = action
+            td = env.step(td)["next"]
+            if td["done"].all():
+                break
+        assert td["done"].all()
+
+    def test_progress_increases_toward_goal(self) -> None:
+        """Moving toward the goal should increase progress."""
+        cfg = _test_cfg(delta_xy=0.3, delta_theta=math.pi / 8)
+        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        td = env.reset()
+        initial_progress = td["progress"][0].item()
+        # Move: translate down + rotate (navigating the bend)
+        for _ in range(5):
+            action = torch.zeros(1, 27, device=TEST_DEVICE)
+            action[0, 1 * 9 + 0 * 3 + 2] = 1.0  # dx=0, dy=-, dt=+
+            td["action"] = action
+            td = env.step(td)["next"]
+        assert td["progress"][0].item() > initial_progress
+
+
+class TestRollout:
+    def test_torchrl_rollout(self, env) -> None:
+        td = env.rollout(max_steps=3)
+        assert td.shape[0] == NUM_ENVS
+        assert td.shape[1] == 3
