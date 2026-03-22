@@ -47,7 +47,7 @@ def compute_frame_data(
     )
 
 
-def _build_composite(
+def build_composite(
     sofa: NDArray[np.float32],
     corridor_mask: NDArray[np.float32],
 ) -> NDArray[np.float32]:
@@ -90,7 +90,7 @@ def render_trajectory(
     extent = [-half, half, -half, half]
 
     # Initialize image panel
-    composite = _build_composite(frames[0].sofa, frames[0].corridor_mask)
+    composite = build_composite(frames[0].sofa, frames[0].corridor_mask)
     img_artist = ax_img.imshow(composite, origin="lower", extent=extent)
     ax_img.set_xlabel("x")
     ax_img.set_ylabel("y")
@@ -112,7 +112,7 @@ def render_trajectory(
 
     def update(frame_idx: int) -> tuple[object, ...]:
         fd = frames[frame_idx]
-        comp = _build_composite(fd.sofa, fd.corridor_mask)
+        comp = build_composite(fd.sofa, fd.corridor_mask)
         img_artist.set_data(comp)
         title.set_text(
             f"Step {fd.step}: pose=({fd.pose[0]:.2f}, {fd.pose[1]:.2f}, {fd.pose[2]:.2f})\n"

@@ -7,7 +7,7 @@ import torch
 from sofa_mover.corridor import DEVICE, GridConfig
 from sofa_mover.visualization.render import (
     FrameData,
-    _build_composite,
+    build_composite,
     compute_frame_data,
     render_trajectory,
 )
@@ -50,7 +50,7 @@ class TestBuildComposite:
         sofa = np.ones((H, W), dtype=np.float32)
         mask = np.ones((H, W), dtype=np.float32)
 
-        rgb = _build_composite(sofa, mask)
+        rgb = build_composite(sofa, mask)
 
         assert rgb.shape == (H, W, 3)
         assert rgb.min() >= 0.0
@@ -62,7 +62,7 @@ class TestBuildComposite:
         sofa = np.zeros((H, W), dtype=np.float32)
         mask = np.zeros((H, W), dtype=np.float32)
 
-        rgb = _build_composite(sofa, mask)
+        rgb = build_composite(sofa, mask)
 
         np.testing.assert_allclose(rgb[0, 0], [0.2, 0.2, 0.2])
 
@@ -72,7 +72,7 @@ class TestBuildComposite:
         sofa = np.zeros((H, W), dtype=np.float32)
         mask = np.ones((H, W), dtype=np.float32)
 
-        rgb = _build_composite(sofa, mask)
+        rgb = build_composite(sofa, mask)
 
         np.testing.assert_allclose(rgb[0, 0], [0.8, 0.8, 0.8])
 
@@ -82,7 +82,7 @@ class TestBuildComposite:
         sofa = np.ones((H, W), dtype=np.float32)
         mask = np.ones((H, W), dtype=np.float32)
 
-        rgb = _build_composite(sofa, mask)
+        rgb = build_composite(sofa, mask)
 
         np.testing.assert_allclose(rgb[0, 0], [0.27, 0.47, 0.73])
 

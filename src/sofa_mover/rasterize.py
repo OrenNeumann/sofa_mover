@@ -102,7 +102,7 @@ class Rasterizer:
         pose_prev: Pose,
         pose_next: Pose,
         num_substeps: int,
-    ) -> Float[Tensor, "B 1 Hs Ws"]:
+    ) -> tuple[Float[Tensor, "B 1 Hs Ws"], Float[Tensor, "B 1 Hs Ws"]]:
         """Compute the swept corridor mask between two poses (fused).
 
         Samples num_substeps intermediate poses (excluding the previous, including
@@ -113,9 +113,9 @@ class Rasterizer:
         intermediate position. With num_substeps=1, this is equivalent to
         corridor_mask at the next pose.
 
-        Uses a single grid_sample with batch size B*K (K=num_substeps) for better
-        GPU utilization. See _swept_mask_loop for a memory-lighter alternative that
-        processes substeps sequentially.
+        Returns:
+            (swept_mask, corridor_mask_at_next_pose). The second element is the
+            corridor mask at pose_next, extracted from the last substep for free.
         """
         if num_substeps < 1:
             raise ValueError(f"num_substeps must be >= 1, got {num_substeps}")
@@ -154,37 +154,6 @@ class Rasterizer:
         # Reshape and take intersection (min) across substeps
         masks = masks_flat.reshape(num_substeps, B, 1, H, W)
         swept, _ = masks.min(dim=0)  # (B, 1, H, W)
-        return swept
-
-    def _swept_mask_loop(
-        self,
-        pose_prev: Pose,
-        pose_next: Pose,
-        num_substeps: int,
-    ) -> Float[Tensor, "B 1 Hs Ws"]:
-        """Compute swept corridor mask using a sequential loop over substeps.
-
-        Lighter on memory than the fused swept_mask (allocates one mask at a time
-        instead of K masks simultaneously), but slower at low batch numbers due to K sequential
-        kernel launches. roughly same speed as other method.
-        """
-        if num_substeps < 1:
-            raise ValueError(f"num_substeps must be >= 1, got {num_substeps}")
-
-        device = pose_prev.device
-        t_values = torch.linspace(0.0, 1.0, num_substeps + 1, device=device)[1:]
-        delta = pose_next - pose_prev
-
-        swept: Tensor | None = None
-
-        for t in t_values:
-            pose_t = pose_prev + t * delta
-            mask_t = self.corridor_mask(pose_t)
-
-            if swept is None:
-                swept = mask_t
-            else:
-                torch.min(swept, mask_t, out=swept)
-
-        assert swept is not None
-        return swept
+        # Last substep (t=1) is the corridor mask at pose_next
+        corridor_at_next = masks[-1]  # (B, 1, H, W)
+        return swept, corridor_at_next

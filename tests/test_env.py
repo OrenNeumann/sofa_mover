@@ -158,6 +158,106 @@ class TestGoalDetection:
         assert td["progress"][0].item() > initial_progress
 
 
+class TestEpisodeAccumulators:
+    def test_accumulators_present_in_step_output(self, env) -> None:
+        td = env.reset()
+        td["action"] = _noop_action(NUM_ENVS)
+        td_next = env.step(td)["next"]
+        for key in [
+            "episode_total_angle",
+            "episode_total_distance",
+            "episode_area_integral",
+            "episode_length",
+            "terminal_area",
+        ]:
+            assert key in td_next.keys(), f"Missing key: {key}"
+            assert td_next[key].shape == (NUM_ENVS, 1)
+
+    def test_noop_angle_and_distance_zero(self, env) -> None:
+        td = env.reset()
+        td["action"] = _noop_action(NUM_ENVS)
+        td_next = env.step(td)["next"]
+        assert (td_next["episode_total_angle"] == 0).all()
+        assert (td_next["episode_total_distance"] == 0).all()
+        assert (td_next["episode_area_integral"] > 0).all()
+
+    def test_accumulators_increase_over_steps(self) -> None:
+        cfg = _test_cfg()
+        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        td = env.reset()
+        # Action 0 = (-delta_xy, -delta_xy, -delta_theta) — moves in all axes
+        action = torch.zeros(1, 27, device=TEST_DEVICE)
+        action[0, 0] = 1.0
+        prev_dist = 0.0
+        prev_angle = 0.0
+        for _ in range(3):
+            td["action"] = action
+            td = env.step(td)["next"]
+            dist = td["episode_total_distance"][0].item()
+            angle = td["episode_total_angle"][0].item()
+            assert dist > prev_dist
+            assert angle > prev_angle
+            prev_dist = dist
+            prev_angle = angle
+
+    def test_accumulators_reset_on_done(self) -> None:
+        cfg = _test_cfg(max_steps=3)
+        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        td = env.reset()
+        # Run to truncation with non-noop actions
+        action = torch.zeros(1, 27, device=TEST_DEVICE)
+        action[0, 0] = 1.0
+        for _ in range(3):
+            td["action"] = action
+            td = env.step(td)["next"]
+        assert td["done"].all()
+        # Accumulators should be nonzero before reset
+        assert td["episode_total_angle"][0].item() > 0
+        # Reset and step — accumulators should be fresh
+        td2 = env.reset()
+        td2["action"] = _noop_action(1)
+        td2_next = env.step(td2)["next"]
+        assert td2_next["episode_total_angle"][0].item() == 0.0
+        assert td2_next["episode_total_distance"][0].item() == 0.0
+
+    def test_area_integral_correctness(self) -> None:
+        """After N noop steps, area_integral = N * constant_area."""
+        cfg = _test_cfg()
+        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        td = env.reset()
+        n_steps = 5
+        for _ in range(n_steps):
+            td["action"] = _noop_action(1)
+            td = env.step(td)["next"]
+        # Noop preserves area, so current area = initial area after erosion
+        current_area = env._sofa.sum().item() * env.cell_area
+        integral = td["episode_area_integral"][0].item()
+        assert integral == pytest.approx(n_steps * current_area, rel=1e-4)
+
+    def test_terminal_area_zero_on_truncation(self) -> None:
+        """terminal_area should be 0 when episode ends by truncation."""
+        cfg = _test_cfg(max_steps=3)
+        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        td = env.reset()
+        for _ in range(3):
+            td["action"] = _noop_action(1)
+            td = env.step(td)["next"]
+        assert td["done"].all()
+        assert td["truncated"].all()
+        assert td["terminal_area"][0].item() == 0.0
+
+    def test_terminal_area_nonzero_on_goal(self) -> None:
+        """terminal_area should be positive when the goal is reached."""
+        # goal_radius=10 guarantees immediate goal reach on first step
+        cfg = _test_cfg(goal_radius=10.0)
+        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        td = env.reset()
+        td["action"] = _noop_action(1)
+        td = env.step(td)["next"]
+        assert td["terminated"].all()
+        assert td["terminal_area"][0].item() > 0.0
+
+
 class TestRollout:
     def test_torchrl_rollout(self, env) -> None:
         td = env.rollout(max_steps=3)

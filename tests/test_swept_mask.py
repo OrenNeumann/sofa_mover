@@ -11,7 +11,7 @@ def test_one_substep_matches_single_mask(rasterizer: Rasterizer) -> None:
     pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
     pose_next = torch.tensor([[0.3, -0.2, math.pi / 6]], device=d)
 
-    swept = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=1)
+    swept, _ = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=1)
     single = rasterizer.corridor_mask(pose_next)
     assert torch.equal(swept, single)
 
@@ -22,7 +22,7 @@ def test_swept_mask_subset_of_endpoint(rasterizer: Rasterizer) -> None:
     pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
     pose_next = torch.tensor([[0.2, -0.3, math.pi / 4]], device=d)
 
-    swept = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=4)
+    swept, _ = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=4)
     endpoint = rasterizer.corridor_mask(pose_next)
     assert swept.sum().item() <= endpoint.sum().item()
 
@@ -33,7 +33,7 @@ def test_more_erosion_than_endpoint_only(rasterizer: Rasterizer) -> None:
     pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
     pose_next = torch.tensor([[0.0, 0.0, math.pi / 4]], device=d)
 
-    swept = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=8)
+    swept, _ = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=8)
     endpoint = rasterizer.corridor_mask(pose_next)
     assert swept.sum().item() < endpoint.sum().item()
 
@@ -46,7 +46,7 @@ def test_more_substeps_more_erosion(rasterizer: Rasterizer) -> None:
 
     areas = []
     for k in [1, 2, 4, 8, 16]:
-        swept = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=k)
+        swept, _ = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=k)
         areas.append(swept.sum().item())
 
     for i in range(1, len(areas)):
@@ -60,7 +60,7 @@ def test_no_motion_is_idempotent(rasterizer: Rasterizer) -> None:
     single = rasterizer.corridor_mask(pose)
 
     for k in [1, 4, 8]:
-        swept = rasterizer.swept_mask(pose, pose, num_substeps=k)
+        swept, _ = rasterizer.swept_mask(pose, pose, num_substeps=k)
         assert torch.equal(swept, single)
 
 
@@ -86,10 +86,10 @@ def test_batched_matches_individual(rasterizer: Rasterizer) -> None:
         device=d,
     )
 
-    batched = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=4)
+    batched, _ = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=4)
 
     for i in range(4):
-        individual = rasterizer.swept_mask(
+        individual, _ = rasterizer.swept_mask(
             pose_prev[i : i + 1], pose_next[i : i + 1], num_substeps=4
         )
         assert torch.equal(batched[i : i + 1], individual)
@@ -101,31 +101,18 @@ def test_output_is_binary(rasterizer: Rasterizer) -> None:
     pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
     pose_next = torch.tensor([[0.2, -0.3, math.pi / 6]], device=d)
 
-    swept = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=4)
+    swept, _ = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=4)
     unique_vals = torch.unique(swept)
     for v in unique_vals:
         assert v.item() in (0.0, 1.0)
 
 
-def test_fused_matches_loop(rasterizer: Rasterizer) -> None:
-    """Fused swept_mask and loop-based _swept_mask_loop produce identical results."""
+def test_corridor_at_next_matches_corridor_mask(rasterizer: Rasterizer) -> None:
+    """Second return value of swept_mask equals corridor_mask at pose_next."""
     d = rasterizer.template.device
-    pose_prev = torch.tensor(
-        [
-            [0.0, 0.0, 0.0],
-            [0.1, -0.1, 0.2],
-        ],
-        device=d,
-    )
-    pose_next = torch.tensor(
-        [
-            [0.3, -0.2, math.pi / 6],
-            [-0.2, 0.1, -0.3],
-        ],
-        device=d,
-    )
+    pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
+    pose_next = torch.tensor([[0.3, -0.2, math.pi / 6]], device=d)
 
-    for k in [1, 2, 4, 8]:
-        fused = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=k)
-        loop = rasterizer._swept_mask_loop(pose_prev, pose_next, num_substeps=k)
-        assert torch.equal(fused, loop), f"Mismatch at num_substeps={k}"
+    _, corridor_at_next = rasterizer.swept_mask(pose_prev, pose_next, num_substeps=4)
+    expected = rasterizer.corridor_mask(pose_next)
+    assert torch.equal(corridor_at_next, expected)
