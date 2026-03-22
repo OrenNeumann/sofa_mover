@@ -20,9 +20,9 @@ def test_no_erosion_when_fully_inside(
     rasterizer: Rasterizer, sofa_config: GridConfig
 ) -> None:
     """If the sofa is fully inside the corridor mask, no erosion occurs."""
-    sofa = _make_sofa(sofa_config, device=rasterizer.template.device)
+    sofa = _make_sofa(sofa_config, device=rasterizer.device)
     mask = rasterizer.corridor_mask(
-        torch.tensor([[0.0, 0.0, 0.0]], device=rasterizer.template.device)
+        torch.tensor([[0.0, 0.0, 0.0]], device=rasterizer.device)
     )
     # Only keep pixels that are inside the corridor
     sofa_inside = sofa * mask
@@ -33,9 +33,9 @@ def test_no_erosion_when_fully_inside(
 
 def test_partial_erosion(rasterizer: Rasterizer, sofa_config: GridConfig) -> None:
     """Erosion with a partial mask reduces area."""
-    sofa = _make_sofa(sofa_config, device=rasterizer.template.device)
+    sofa = _make_sofa(sofa_config, device=rasterizer.device)
     mask = rasterizer.corridor_mask(
-        torch.tensor([[0.0, 0.0, 0.0]], device=rasterizer.template.device)
+        torch.tensor([[0.0, 0.0, 0.0]], device=rasterizer.device)
     )
     # The mask doesn't cover the full sofa grid, so erosion removes pixels
     area_before = sofa.sum().item()
@@ -55,7 +55,7 @@ def test_full_erosion_with_empty_mask(sofa_config: GridConfig) -> None:
 
 def test_cumulative_erosion(rasterizer: Rasterizer, sofa_config: GridConfig) -> None:
     """Multiple erosion steps with different poses yield monotonically decreasing area."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     sofa = _make_sofa(sofa_config, device=d)
 
     poses = [
@@ -80,7 +80,7 @@ def test_cumulative_erosion(rasterizer: Rasterizer, sofa_config: GridConfig) -> 
 
 def test_erosion_idempotent(rasterizer: Rasterizer) -> None:
     """Applying the same mask twice doesn't change the result after the first application."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     sofa = _make_sofa(rasterizer.sofa_config, device=d)
     mask = rasterizer.corridor_mask(torch.tensor([[0.2, -0.1, 0.3]], device=d))
     once = erode(sofa, mask)
@@ -90,7 +90,7 @@ def test_erosion_idempotent(rasterizer: Rasterizer) -> None:
 
 def test_erosion_batched(rasterizer: Rasterizer, sofa_config: GridConfig) -> None:
     """Erosion works correctly with batched inputs."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     batch_size = 4
     sofa = _make_sofa(sofa_config, batch_size=batch_size, device=d)
 
@@ -116,7 +116,7 @@ def test_l_corridor_walkthrough(
     rasterizer: Rasterizer, sofa_config: GridConfig
 ) -> None:
     """Simulate a sofa passing through an L-corridor: translate, rotate, translate."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     sofa = _make_sofa(sofa_config, device=d)
 
     trajectory = [

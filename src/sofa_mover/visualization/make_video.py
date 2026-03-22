@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from sofa_mover.corridor import DEVICE, SOFA_CONFIG, TEMPLATE_CONFIG, make_l_corridor
+from sofa_mover.corridor import DEVICE, SOFA_CONFIG, make_l_corridor
 from sofa_mover.erosion import erode
 from sofa_mover.rasterize import Rasterizer
 from sofa_mover.visualization.render import (
@@ -53,8 +53,8 @@ def make_l_bend_trajectory(
 
 
 def main() -> None:
-    template = make_l_corridor(config=TEMPLATE_CONFIG)
-    rasterizer = Rasterizer(template, SOFA_CONFIG, TEMPLATE_CONFIG)
+    geometry = make_l_corridor()
+    rasterizer = Rasterizer(geometry, SOFA_CONFIG, device=DEVICE, compile=False)
 
     trajectory = make_l_bend_trajectory([15, 12, 12, 12, 15, 4])
     sofa = torch.ones(1, 1, SOFA_CONFIG.grid_size, SOFA_CONFIG.grid_size, device=DEVICE)

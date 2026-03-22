@@ -13,7 +13,6 @@ from torchrl.envs import EnvBase
 from sofa_mover.corridor import (
     DEVICE,
     SOFA_CONFIG,
-    TEMPLATE_CONFIG,
     GridConfig,
     Pose,
     make_l_corridor,
@@ -27,7 +26,7 @@ class SofaEnvConfig:
     """Hyperparameters for the SofaEnv."""
 
     sofa_config: GridConfig = SOFA_CONFIG
-    template_config: GridConfig = TEMPLATE_CONFIG
+    compile_rasterizer: bool = True
     corridor_width: float = 1.0
     delta_xy: float = 0.05
     delta_theta: float = math.pi / 60
@@ -93,13 +92,14 @@ class SofaEnv(EnvBase):
         self.cfg = cfg
         self.num_envs = num_envs
 
-        # Build corridor template and rasterizer
-        template = make_l_corridor(
-            config=cfg.template_config,
-            corridor_width=cfg.corridor_width,
+        # Build corridor geometry and rasterizer
+        geometry = make_l_corridor(corridor_width=cfg.corridor_width)
+        self.rasterizer = Rasterizer(
+            geometry,
+            cfg.sofa_config,
             device=device,
+            compile=cfg.compile_rasterizer,
         )
-        self.rasterizer = Rasterizer(template, cfg.sofa_config, cfg.template_config)
 
         # Action decode table: 27 actions → (dx, dy, dθ)
         deltas_xy = torch.tensor([-cfg.delta_xy, 0.0, cfg.delta_xy], device=device)

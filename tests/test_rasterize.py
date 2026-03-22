@@ -21,7 +21,7 @@ def _make_pose(
 
 def test_identity_pose(rasterizer: Rasterizer, sofa_config: GridConfig) -> None:
     """At pose (0,0,0), the sofa grid should see the center of the template."""
-    pose = _make_pose(0.0, 0.0, 0.0, device=rasterizer.template.device)
+    pose = _make_pose(0.0, 0.0, 0.0, device=rasterizer.device)
     mask = rasterizer.corridor_mask(pose)
 
     assert mask.shape == (1, 1, sofa_config.grid_size, sofa_config.grid_size)
@@ -36,7 +36,7 @@ def test_identity_pose_center_is_passable(
     rasterizer: Rasterizer, sofa_config: GridConfig
 ) -> None:
     """The center of the sofa grid (world origin) should map to the corridor corner."""
-    pose = _make_pose(0.0, 0.0, 0.0, device=rasterizer.template.device)
+    pose = _make_pose(0.0, 0.0, 0.0, device=rasterizer.device)
     mask = rasterizer.corridor_mask(pose)
 
     # The origin is at the corner of the L-corridor.
@@ -49,7 +49,7 @@ def test_identity_pose_center_is_passable(
 
 def test_translation_shifts_mask(rasterizer: Rasterizer) -> None:
     """Translating the corridor should shift the visible mask."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     mask_0 = rasterizer.corridor_mask(_make_pose(0.0, 0.0, 0.0, device=d))
     # Shift corridor to the right by 0.5 world units
     mask_shifted = rasterizer.corridor_mask(_make_pose(0.5, 0.0, 0.0, device=d))
@@ -63,7 +63,7 @@ def test_translation_shifts_mask(rasterizer: Rasterizer) -> None:
 
 def test_rotation_90_degrees(rasterizer: Rasterizer) -> None:
     """Rotating the corridor 90 degrees should produce a different mask."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     mask_0 = rasterizer.corridor_mask(_make_pose(0.0, 0.0, 0.0, device=d))
     mask_90 = rasterizer.corridor_mask(_make_pose(0.0, 0.0, math.pi / 2, device=d))
     assert not torch.equal(mask_0, mask_90)
@@ -77,14 +77,14 @@ def test_rotation_90_degrees(rasterizer: Rasterizer) -> None:
 def test_large_translation_gives_empty_mask(rasterizer: Rasterizer) -> None:
     """Corridor translated far away should produce all-zero mask."""
     mask = rasterizer.corridor_mask(
-        _make_pose(10.0, 10.0, 0.0, device=rasterizer.template.device)
+        _make_pose(10.0, 10.0, 0.0, device=rasterizer.device)
     )
     assert mask.sum().item() == 0.0
 
 
 def test_batch_identical_poses(rasterizer: Rasterizer) -> None:
     """Batch of identical poses should produce identical masks."""
-    pose = _make_pose(0.3, -0.2, 0.1, batch_size=4, device=rasterizer.template.device)
+    pose = _make_pose(0.3, -0.2, 0.1, batch_size=4, device=rasterizer.device)
     masks = rasterizer.corridor_mask(pose)
 
     assert masks.shape[0] == 4
@@ -94,7 +94,7 @@ def test_batch_identical_poses(rasterizer: Rasterizer) -> None:
 
 def test_batch_different_poses(rasterizer: Rasterizer) -> None:
     """Batched results should match individual results."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     poses_list = [(0.0, 0.0, 0.0), (0.5, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.5)]
 
     # Run individually

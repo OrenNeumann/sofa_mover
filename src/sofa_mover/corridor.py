@@ -25,43 +25,56 @@ class GridConfig:
         return self.grid_size / self.world_size
 
 
+@dataclass(frozen=True)
+class Rectangle:
+    """Axis-aligned rectangle in corridor-local coordinates."""
+
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+
+
+@dataclass(frozen=True)
+class CorridorGeometry:
+    """Corridor defined as the union of axis-aligned rectangles.
+
+    Each rectangle is in corridor-local coordinates. A point is inside the
+    corridor if it is inside any of the rectangles.
+    """
+
+    rectangles: tuple[Rectangle, ...]
+
+    def to_tensor(self, device: torch.device) -> Float[Tensor, "R 4"]:
+        """Convert rectangles to a (R, 4) tensor of [x_min, y_min, x_max, y_max]."""
+        return torch.tensor(
+            [[r.x_min, r.y_min, r.x_max, r.y_max] for r in self.rectangles],
+            device=device,
+        )
+
+
 # Default configs
 DEVICE = torch.device("cuda")
 SOFA_CONFIG = GridConfig(grid_size=256, world_size=3.0)
-TEMPLATE_CONFIG = GridConfig(grid_size=256, world_size=6.0)
 
 
 def make_l_corridor(
-    config: GridConfig = TEMPLATE_CONFIG,
     corridor_width: float = 1.0,
-    device: torch.device = DEVICE,
-) -> Float[Tensor, "1 1 H W"]:
-    """Create a binary template for an L-shaped corridor.
+) -> CorridorGeometry:
+    """Create geometry for an L-shaped corridor.
 
     The L-corridor is the union of two perpendicular rectangular legs, centered
-    on the bend (the corridor_width x corridor_width square where the legs meet).
-    Both legs extend to the world edges:
-      - Horizontal leg: x in [-hw, half], y in [-hw, hw]
-      - Vertical leg:   x in [-hw, hw], y in [-half, hw]
-    where hw = corridor_width / 2, half = world_size / 2.
+    on the bend (the corridor_width x corridor_width square where the legs meet):
+      - Horizontal leg: x in [-hw, +inf), y in [-hw, hw]
+      - Vertical leg:   x in [-hw, hw],  y in (-inf, hw]
+    where hw = corridor_width / 2.
 
     The sofa enters from the bottom of the vertical leg and exits through the
     right end of the horizontal leg.
-
-    Returns:
-        Binary float tensor (1, 1, H, W). 1.0 = passable, 0.0 = wall.
     """
-    half = config.world_size / 2
-    coords = torch.linspace(-half, half, config.grid_size, device=device)
-    y_grid, x_grid = torch.meshgrid(coords, coords, indexing="ij")
-
     hw = corridor_width / 2
 
-    # Horizontal leg: x in [-hw, half], y in [-hw, hw]
-    horizontal = (x_grid >= -hw) & (y_grid >= -hw) & (y_grid <= hw)
+    horizontal = Rectangle(x_min=-hw, y_min=-hw, x_max=float("inf"), y_max=hw)
+    vertical = Rectangle(x_min=-hw, y_min=-float("inf"), x_max=hw, y_max=hw)
 
-    # Vertical leg: x in [-hw, hw], y in [-half, hw]
-    vertical = (x_grid >= -hw) & (x_grid <= hw) & (y_grid <= hw)
-
-    template = (horizontal | vertical).float()
-    return template.unsqueeze(0).unsqueeze(0)
+    return CorridorGeometry(rectangles=(horizontal, vertical))

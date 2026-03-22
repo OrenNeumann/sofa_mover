@@ -12,7 +12,6 @@ from sofa_mover.env import SofaEnvConfig, make_sofa_env
 # Use small grids + CPU for fast tests
 TEST_DEVICE = torch.device("cpu")
 TEST_SOFA = GridConfig(grid_size=32, world_size=3.0)
-TEST_TEMPLATE = GridConfig(grid_size=32, world_size=6.0)
 NUM_ENVS = 2
 H = TEST_SOFA.grid_size
 
@@ -20,8 +19,8 @@ H = TEST_SOFA.grid_size
 def _test_cfg(**overrides) -> SofaEnvConfig:
     defaults = dict(
         sofa_config=TEST_SOFA,
-        template_config=TEST_TEMPLATE,
         max_steps=20,
+        compile_rasterizer=False,
     )
     defaults.update(overrides)
     return SofaEnvConfig(**defaults)  # type: ignore[arg-type]

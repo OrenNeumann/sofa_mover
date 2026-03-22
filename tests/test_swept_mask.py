@@ -7,7 +7,7 @@ from sofa_mover.rasterize import Rasterizer
 
 def test_one_substep_matches_single_mask(rasterizer: Rasterizer) -> None:
     """With num_substeps=1, swept mask == corridor_mask at next pose."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
     pose_next = torch.tensor([[0.3, -0.2, math.pi / 6]], device=d)
 
@@ -18,7 +18,7 @@ def test_one_substep_matches_single_mask(rasterizer: Rasterizer) -> None:
 
 def test_swept_mask_subset_of_endpoint(rasterizer: Rasterizer) -> None:
     """Swept mask area <= endpoint-only mask area (it's a subset)."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
     pose_next = torch.tensor([[0.2, -0.3, math.pi / 4]], device=d)
 
@@ -29,7 +29,7 @@ def test_swept_mask_subset_of_endpoint(rasterizer: Rasterizer) -> None:
 
 def test_more_erosion_than_endpoint_only(rasterizer: Rasterizer) -> None:
     """With nontrivial rotation, swept mask has strictly less passable area than endpoint."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
     pose_next = torch.tensor([[0.0, 0.0, math.pi / 4]], device=d)
 
@@ -40,7 +40,7 @@ def test_more_erosion_than_endpoint_only(rasterizer: Rasterizer) -> None:
 
 def test_more_substeps_more_erosion(rasterizer: Rasterizer) -> None:
     """Increasing num_substeps monotonically decreases (or maintains) swept mask area."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
     pose_next = torch.tensor([[0.2, -0.3, math.pi / 4]], device=d)
 
@@ -55,7 +55,7 @@ def test_more_substeps_more_erosion(rasterizer: Rasterizer) -> None:
 
 def test_no_motion_is_idempotent(rasterizer: Rasterizer) -> None:
     """If prev == next, swept mask equals single mask regardless of num_substeps."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     pose = torch.tensor([[0.2, -0.1, 0.3]], device=d)
     single = rasterizer.corridor_mask(pose)
 
@@ -66,7 +66,7 @@ def test_no_motion_is_idempotent(rasterizer: Rasterizer) -> None:
 
 def test_batched_matches_individual(rasterizer: Rasterizer) -> None:
     """Batched swept masks match individually computed ones."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     pose_prev = torch.tensor(
         [
             [0.0, 0.0, 0.0],
@@ -97,7 +97,7 @@ def test_batched_matches_individual(rasterizer: Rasterizer) -> None:
 
 def test_output_is_binary(rasterizer: Rasterizer) -> None:
     """Swept mask output contains only 0.0 and 1.0."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
     pose_next = torch.tensor([[0.2, -0.3, math.pi / 6]], device=d)
 
@@ -109,7 +109,7 @@ def test_output_is_binary(rasterizer: Rasterizer) -> None:
 
 def test_corridor_at_next_matches_corridor_mask(rasterizer: Rasterizer) -> None:
     """Second return value of swept_mask equals corridor_mask at pose_next."""
-    d = rasterizer.template.device
+    d = rasterizer.device
     pose_prev = torch.tensor([[0.0, 0.0, 0.0]], device=d)
     pose_next = torch.tensor([[0.3, -0.2, math.pi / 6]], device=d)
 

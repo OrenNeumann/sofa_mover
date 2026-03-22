@@ -1,4 +1,4 @@
-"""Quick visualization of corridor template, rasterized masks, and erosion."""
+"""Quick visualization of corridor masks and erosion."""
 
 import math
 from pathlib import Path
@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 
 from sofa_mover.corridor import (
     DEVICE,
+    GridConfig,
     make_l_corridor,
     SOFA_CONFIG,
-    TEMPLATE_CONFIG,
 )
 from sofa_mover.rasterize import Rasterizer
 from sofa_mover.erosion import erode
@@ -20,30 +20,41 @@ def main() -> None:
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
 
-    template = make_l_corridor(config=TEMPLATE_CONFIG)
-    rasterizer = Rasterizer(template, SOFA_CONFIG, TEMPLATE_CONFIG)
+    geometry = make_l_corridor()
+    rasterizer = Rasterizer(geometry, SOFA_CONFIG, device=DEVICE, compile=False)
     sofa = torch.ones(1, 1, SOFA_CONFIG.grid_size, SOFA_CONFIG.grid_size, device=DEVICE)
 
-    # --- Figure 1: Corridor template ---
+    # --- Figure 1: Corridor masks at various poses ---
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
+    # Panel 1: Corridor at identity pose on a larger grid (zoomed-out view)
+    overview_config = GridConfig(grid_size=256, world_size=6.0)
+    large_rasterizer = Rasterizer(
+        geometry,
+        overview_config,
+        device=DEVICE,
+        compile=False,
+    )
+    template_view = large_rasterizer.corridor_mask(
+        torch.tensor([[0.0, 0.0, 0.0]], device=DEVICE)
+    )
     axes[0].imshow(
-        template[0, 0].cpu().numpy(),
+        template_view[0, 0].cpu().numpy(),
         origin="lower",
         extent=[
-            -TEMPLATE_CONFIG.world_size / 2,
-            TEMPLATE_CONFIG.world_size / 2,
-            -TEMPLATE_CONFIG.world_size / 2,
-            TEMPLATE_CONFIG.world_size / 2,
+            -overview_config.world_size / 2,
+            overview_config.world_size / 2,
+            -overview_config.world_size / 2,
+            overview_config.world_size / 2,
         ],
         cmap="Greys_r",
     )
-    axes[0].set_title("L-Corridor Template (6x6 world units)")
+    axes[0].set_title("L-Corridor at identity (6x6 world units)")
     axes[0].set_xlabel("x")
     axes[0].set_ylabel("y")
     axes[0].set_aspect("equal")
 
-    # --- Figure 2: Mask at identity pose ---
+    # --- Panel 2: Mask at identity pose (sofa view) ---
     mask_identity = rasterizer.corridor_mask(
         torch.tensor([[0.0, 0.0, 0.0]], device=DEVICE)
     )
@@ -63,7 +74,7 @@ def main() -> None:
     axes[1].set_ylabel("y")
     axes[1].set_aspect("equal")
 
-    # --- Figure 3: Mask at rotated pose ---
+    # --- Panel 3: Mask at rotated pose ---
     mask_rotated = rasterizer.corridor_mask(
         torch.tensor([[0.0, 0.0, math.pi / 4]], device=DEVICE)
     )

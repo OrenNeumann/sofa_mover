@@ -20,6 +20,6 @@ def device() -> torch.device:
 
 
 @pytest.fixture
-def rasterizer(sofa_config: GridConfig, template_config: GridConfig) -> Rasterizer:
-    template = make_l_corridor(config=template_config)
-    return Rasterizer(template, sofa_config, template_config)
+def rasterizer(sofa_config: GridConfig) -> Rasterizer:
+    geometry = make_l_corridor()
+    return Rasterizer(geometry, sofa_config, device=DEVICE, compile=False)
