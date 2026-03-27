@@ -49,7 +49,12 @@ def _random_action(B: int) -> torch.Tensor:
 class TestReset:
     def test_shapes(self, env) -> None:
         td = env.reset()
-        assert td["observation"].shape == (NUM_ENVS, 2, H, H)
+        obs = td["observation"]
+        # 1-channel sofa, cropped to bounding box
+        assert obs.shape[0] == NUM_ENVS
+        assert obs.shape[1] == 1  # single channel (sofa only)
+        assert obs.dtype == torch.uint8
+        assert td["pose"].shape == (NUM_ENVS, 3)
         assert td["progress"].shape == (NUM_ENVS, 1)
         assert td["done"].shape == (NUM_ENVS, 1)
 
@@ -70,11 +75,10 @@ class TestReset:
         expected = torch.tensor([list(env.cfg.initial_pose)], device=TEST_DEVICE)
         assert torch.allclose(env._pose, expected.expand(NUM_ENVS, -1))
 
-    def test_observation_two_channels_binary(self, env) -> None:
+    def test_observation_single_channel_binary(self, env) -> None:
         td = env.reset()
-        obs = td["observation"]
-        assert obs[:, 0:1].min() >= 0.0 and obs[:, 0:1].max() <= 1.0
-        assert obs[:, 1:2].min() >= 0.0 and obs[:, 1:2].max() <= 1.0
+        obs = td["observation"].float()
+        assert obs.min() >= 0.0 and obs.max() <= 1.0
 
 
 class TestStep:
@@ -82,7 +86,10 @@ class TestStep:
         td = env.reset()
         td["action"] = _noop_action(NUM_ENVS)
         td_next = env.step(td)["next"]
-        assert td_next["observation"].shape == (NUM_ENVS, 2, H, H)
+        obs = td_next["observation"]
+        assert obs.shape[0] == NUM_ENVS
+        assert obs.shape[1] == 1  # single channel
+        assert td_next["pose"].shape == (NUM_ENVS, 3)
         assert td_next["reward"].shape == (NUM_ENVS, 1)
         assert td_next["done"].shape == (NUM_ENVS, 1)
         assert td_next["terminated"].shape == (NUM_ENVS, 1)
@@ -255,6 +262,34 @@ class TestEpisodeAccumulators:
         td = env.step(td)["next"]
         assert td["terminated"].all()
         assert td["terminal_area"][0].item() > 0.0
+
+
+class TestObsModes:
+    def test_downscale(self) -> None:
+        cfg = _test_cfg(obs_downscale=2)
+        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        td = env.reset()
+        obs = td["observation"]
+        assert obs.shape[1] == 1
+        # Downscaled: each dim halved from crop
+        crop_h = env._crop_y.stop - env._crop_y.start
+        crop_w = env._crop_x.stop - env._crop_x.start
+        assert obs.shape[2] == crop_h // 2
+        assert obs.shape[3] == crop_w // 2
+
+    def test_boundary_mode(self) -> None:
+        cfg = _test_cfg(boundary_rays=64)
+        env = make_sofa_env(num_envs=2, cfg=cfg, device=TEST_DEVICE)
+        td = env.reset()
+        obs = td["observation"]
+        assert obs.shape == (2, 64)
+        assert obs.dtype == torch.float32
+        assert obs.min() >= 0.0
+        assert obs.max() <= 1.0
+        # After stepping, boundary should still be valid
+        td["action"] = _noop_action(2)
+        td_next = env.step(td)["next"]
+        assert td_next["observation"].shape == (2, 64)
 
 
 class TestRollout:

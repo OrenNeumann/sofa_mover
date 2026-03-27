@@ -4,7 +4,9 @@ import math
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from jaxtyping import Float
+from sofa_mover.boundary import BoundaryExtractor
 from tensordict import TensorDict, TensorDictBase
 from torch import Tensor
 from torchrl.data.tensor_specs import Bounded, Composite, OneHot, Unbounded
@@ -39,6 +41,10 @@ class SofaEnvConfig:
     # Goal point in corridor-centric coords (middle of exit end)
     goal_point: tuple[float, float] = (2.0, 0.0)
     goal_radius: float = 0.3
+    # Observation downscale factor (1 = full res, 2 = half, 4 = quarter)
+    obs_downscale: int = 1
+    # Boundary observation: number of rays (0 = use grid, >0 = use boundary profile)
+    boundary_rays: int = 0
 
 
 def _goal_corridor_to_sofa(
@@ -126,8 +132,6 @@ class SofaEnv(EnvBase):
         half = cfg.sofa_config.world_size / 2
         coords = torch.linspace(-half, half, H, device=device)
         y_grid, x_grid = torch.meshgrid(coords, coords, indexing="ij")
-        self.x_grid: torch.Tensor = x_grid
-        self.y_grid: torch.Tensor = y_grid
 
         # Goal point in corridor-centric coords (constant)
         self.goal_corridor: torch.Tensor = torch.tensor(cfg.goal_point, device=device)
@@ -136,14 +140,23 @@ class SofaEnv(EnvBase):
         self.cell_area = (cfg.sofa_config.world_size / H) ** 2
         init_pose = torch.tensor([list(cfg.initial_pose)], device=device)
         init_mask = self.rasterizer.corridor_mask(init_pose)
+
+        # Compute crop bounding box from initial sofa (sofa can only shrink)
+        self._crop_y, self._crop_x = self._bbox(init_mask)
+
+        # Crop grids for COM calculation
+        self.x_grid: torch.Tensor = x_grid[self._crop_y, self._crop_x]
+        self.y_grid: torch.Tensor = y_grid[self._crop_y, self._crop_x]
+
+        init_cropped = self._crop(init_mask)
         self.initial_area = init_mask.sum().item() * self.cell_area
-        init_sofa = torch.ones(1, 1, H, H, device=device) * init_mask
-        init_com = _sofa_com(init_sofa, x_grid, y_grid)
+        init_com = _sofa_com(init_cropped, self.x_grid, self.y_grid)
         init_goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, init_pose)
         self.initial_goal_dist = (init_com - init_goal_sofa).norm(dim=-1).item()
 
-        # Internal state — NOT in full_state_spec to avoid huge collector buffers
-        self._sofa = torch.ones(num_envs, 1, H, H, device=device)
+        # Internal state — cropped to bbox
+        crop_h, crop_w = init_cropped.shape[2], init_cropped.shape[3]
+        self._sofa = torch.ones(num_envs, 1, crop_h, crop_w, device=device)
         self._pose = torch.zeros(num_envs, 3, device=device)
         self._step_count = torch.zeros(num_envs, 1, dtype=torch.int64, device=device)
 
@@ -152,21 +165,52 @@ class SofaEnv(EnvBase):
         self._episode_total_distance = torch.zeros(num_envs, 1, device=device)
         self._episode_area_integral = torch.zeros(num_envs, 1, device=device)
 
+        # Boundary ray-casting setup (if enabled)
+        if cfg.boundary_rays > 0:
+            self._boundary = BoundaryExtractor(
+                cfg.boundary_rays, init_cropped[0, 0], device
+            )
+
         self._make_specs()
 
+    def _downscale_obs(self, obs: torch.Tensor) -> torch.Tensor:
+        """Downscale observation if obs_downscale > 1."""
+        if self.cfg.obs_downscale <= 1:
+            return obs
+        return (
+            F.avg_pool2d(obs.float(), kernel_size=self.cfg.obs_downscale)
+            .round()
+            .to(torch.uint8)
+        )
+
     def _make_specs(self) -> None:
-        H = self.cfg.sofa_config.grid_size
         B = self.num_envs
 
         _unbounded_b1 = dict(shape=(B, 1), dtype=torch.float32, device=self.device)
-        self.observation_spec = Composite(
-            observation=Bounded(
+        if self.cfg.boundary_rays > 0:
+            obs_spec = Bounded(
                 low=0.0,
                 high=1.0,
-                shape=(B, 2, H, H),
+                shape=(B, self.cfg.boundary_rays),
                 dtype=torch.float32,
                 device=self.device,
-            ),
+            )
+        else:
+            obs_spec = Bounded(
+                low=0,
+                high=1,
+                shape=(
+                    B,
+                    1,
+                    (self._crop_y.stop - self._crop_y.start) // self.cfg.obs_downscale,
+                    (self._crop_x.stop - self._crop_x.start) // self.cfg.obs_downscale,
+                ),
+                dtype=torch.uint8,
+                device=self.device,
+            )
+        self.observation_spec = Composite(
+            observation=obs_spec,
+            pose=Unbounded(shape=(B, 3), dtype=torch.float32, device=self.device),
             progress=Unbounded(**_unbounded_b1),
             terminal_area=Unbounded(**_unbounded_b1),
             episode_length=Unbounded(
@@ -191,9 +235,20 @@ class SofaEnv(EnvBase):
             device=self.device,
         )
 
+    @staticmethod
+    def _bbox(mask: Float[Tensor, "1 1 H W"]) -> tuple[slice, slice]:
+        """Bounding box (y_slice, x_slice) of nonzero pixels."""
+        nz = mask[0, 0].nonzero(as_tuple=True)
+        y0, y1 = int(nz[0].min()), int(nz[0].max()) + 1
+        x0, x1 = int(nz[1].min()), int(nz[1].max()) + 1
+        return slice(y0, y1), slice(x0, x1)
+
+    def _crop(self, t: torch.Tensor) -> torch.Tensor:
+        """Crop a (B, C, H, W) tensor to the sofa bounding box."""
+        return t[:, :, self._crop_y, self._crop_x]
+
     def _reset(self, tensordict: TensorDictBase) -> TensorDictBase:
         B = self.num_envs
-        H = self.cfg.sofa_config.grid_size
         device = self.device
 
         # Determine which envs need reset
@@ -211,9 +266,10 @@ class SofaEnv(EnvBase):
                 .contiguous()
             )
 
+            H = self.cfg.sofa_config.grid_size
             fresh_sofa = torch.ones(n_reset, 1, H, H, device=device)
             initial_mask = self.rasterizer.corridor_mask(initial_pose)
-            fresh_sofa = erode(fresh_sofa, initial_mask)
+            fresh_sofa = self._crop(erode(fresh_sofa, initial_mask))
 
             self._sofa[reset_mask] = fresh_sofa
             self._pose[reset_mask] = initial_pose
@@ -222,9 +278,11 @@ class SofaEnv(EnvBase):
             self._episode_total_distance[reset_mask] = 0.0
             self._episode_area_integral[reset_mask] = 0.0
 
-        # Build observation: (B, 2, H, H) = sofa + corridor_mask
-        corridor_mask = self.rasterizer.corridor_mask(self._pose)
-        observation = torch.cat([self._sofa, corridor_mask], dim=1)
+        # Build observation
+        if self.cfg.boundary_rays > 0:
+            observation = self._boundary(self._sofa)
+        else:
+            observation = self._downscale_obs(self._sofa.to(torch.uint8))
 
         # Progress = 1 - (dist_to_goal / initial_dist)
         com = _sofa_com(self._sofa, self.x_grid, self.y_grid)
@@ -237,6 +295,7 @@ class SofaEnv(EnvBase):
         return TensorDict(
             {
                 "observation": observation,
+                "pose": self._pose.clone(),
                 "progress": progress,
                 "done": torch.zeros(B, 1, dtype=torch.bool, device=device),
                 "terminated": torch.zeros(B, 1, dtype=torch.bool, device=device),
@@ -272,11 +331,11 @@ class SofaEnv(EnvBase):
         # Area before erosion
         area_before = self._sofa.flatten(1).sum(dim=1) * self.cell_area  # (B,)
 
-        # Swept mask erosion (also returns corridor mask at pose_next for free)
-        swept, corridor_mask = self.rasterizer.swept_mask(
+        # Swept mask erosion (rasterizer works on full grid, crop result)
+        swept, _corridor_at_next = self.rasterizer.swept_mask(
             pose, pose_next, cfg.num_substeps
         )
-        new_sofa = erode(self._sofa, swept)
+        new_sofa = erode(self._sofa, self._crop(swept))
 
         # Area after erosion
         area_after = new_sofa.flatten(1).sum(dim=1) * self.cell_area  # (B,)
@@ -315,7 +374,10 @@ class SofaEnv(EnvBase):
         self._goal_dist = goal_dist
 
         # Observation
-        observation = torch.cat([new_sofa, corridor_mask], dim=1)
+        if self.cfg.boundary_rays > 0:
+            observation = self._boundary(new_sofa)
+        else:
+            observation = self._downscale_obs(new_sofa.to(torch.uint8))
 
         # Progress = 1 - (dist_to_goal / initial_dist)
         progress = 1.0 - goal_dist.unsqueeze(1) / max(self.initial_goal_dist, 1e-8)
@@ -323,6 +385,7 @@ class SofaEnv(EnvBase):
         return TensorDict(
             {
                 "observation": observation,
+                "pose": self._pose.clone(),
                 "progress": progress,
                 "reward": reward,
                 "done": done.unsqueeze(1),

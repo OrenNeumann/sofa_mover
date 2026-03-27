@@ -7,6 +7,7 @@ import torch
 from sofa_mover.corridor import DEVICE
 from sofa_mover.env import SofaEnvConfig, make_sofa_env
 from sofa_mover.networks import SofaActorNet
+from sofa_mover.obs_mode import make_encoder
 from sofa_mover.visualization.render import (
     FrameData,
     compute_frame_data,
@@ -27,11 +28,12 @@ def evaluate(
     # Single-env for visualization
     env = make_sofa_env(num_envs=1, cfg=cfg, device=device)
 
-    # Rebuild actor
-    actor_net = SofaActorNet().to(device)
+    # Rebuild actor with the correct encoder for this checkpoint's config
+    encoder = make_encoder(cfg)
+    actor_net = SofaActorNet(encoder=encoder).to(device)
     actor_module = TensorDictModule(
         actor_net,
-        in_keys=["observation", "progress"],
+        in_keys=["observation", "pose", "progress"],
         out_keys=["logits"],
     )
     actor = ProbabilisticActor(
@@ -54,8 +56,10 @@ def evaluate(
                 env._pose[0, 1].item(),
                 env._pose[0, 2].item(),
             )
-            sofa = td["observation"][:, 0:1]  # channel 0 = sofa
-            mask = td["observation"][:, 1:2]  # channel 1 = corridor mask
+            # For boundary mode, obs is 1D — use internal sofa grid for viz
+            sofa = env._sofa.float()  # (1, 1, crop_h, crop_w)
+            corridor_full = env.rasterizer.corridor_mask(env._pose)
+            mask = env._crop(corridor_full)
             frames.append(
                 compute_frame_data(step, pose_tuple, sofa, mask, cfg.sofa_config)
             )
@@ -76,8 +80,9 @@ def evaluate(
                     env._pose[0, 1].item(),
                     env._pose[0, 2].item(),
                 )
-                sofa = td["observation"][:, 0:1]
-                mask = td["observation"][:, 1:2]
+                sofa = env._sofa.float()
+                corridor_full = env.rasterizer.corridor_mask(env._pose)
+                mask = env._crop(corridor_full)
                 frames.append(
                     compute_frame_data(
                         step + 1, pose_tuple, sofa, mask, cfg.sofa_config

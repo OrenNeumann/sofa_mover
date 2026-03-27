@@ -10,12 +10,13 @@ class SofaEncoder(nn.Module):
     """CNN encoder for the sofa grid observation.
 
     Resolution-independent thanks to AdaptiveAvgPool2d.
+    Takes 1-channel sofa grid + pose (3) + progress (1) as inputs.
     """
 
-    def __init__(self, feature_dim: int = 128) -> None:
+    def __init__(self, feature_dim: int = 128, in_channels: int = 1) -> None:
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(2, 16, kernel_size=5, stride=4, padding=2),
+            nn.Conv2d(in_channels, 16, kernel_size=5, stride=4, padding=2),
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
@@ -25,35 +26,77 @@ class SofaEncoder(nn.Module):
             nn.ReLU(),
             nn.AdaptiveAvgPool2d(1),
         )
-        self.fc = nn.Linear(128 + 1, feature_dim)
+        # conv_out (128) + pose (3) + progress (1) = 132
+        self.fc = nn.Linear(128 + 3 + 1, feature_dim)
         self.relu = nn.ReLU()
 
     def forward(
         self,
-        observation: Float[Tensor, "*batch 2 H W"],
+        observation: Float[Tensor, "*batch 1 H W"],
+        pose: Float[Tensor, "*batch 3"],
         progress: Float[Tensor, "*batch 1"],
     ) -> Float[Tensor, "*batch feature_dim"]:
+        # Cast uint8 observations to float32 for conv layers
+        observation = observation.float()
         # Flatten any leading batch dims (e.g. [B, T, C, H, W] -> [B*T, C, H, W])
         leading = observation.shape[:-3]
         x = observation.reshape(-1, *observation.shape[-3:])
         x = self.conv(x)
         x = x.flatten(1)
         p = progress.reshape(-1, 1)
-        x = torch.cat([x, p], dim=1)
+        pose_flat = pose.reshape(-1, 3)
+        x = torch.cat([x, pose_flat, p], dim=1)
         x = self.relu(self.fc(x))
         return x.reshape(*leading, -1)
 
 
-class SofaActorNet(nn.Module):
-    """Actor network: observation + progress -> action logits.
+class SofaBoundaryEncoder(nn.Module):
+    """MLP encoder for boundary profile observations.
 
-    Uses a shared encoder (call .encoder to get the same instance for the
-    critic).
+    Takes a 1D radial profile (N,) + pose (3) + progress (1) and produces features.
     """
 
-    def __init__(self, feature_dim: int = 128, n_actions: int = 27) -> None:
+    def __init__(self, n_rays: int = 128, feature_dim: int = 128) -> None:
         super().__init__()
-        self.encoder = SofaEncoder(feature_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(n_rays + 3 + 1, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, feature_dim),
+            nn.ReLU(),
+        )
+
+    def forward(
+        self,
+        observation: Float[Tensor, "*batch N"],
+        pose: Float[Tensor, "*batch 3"],
+        progress: Float[Tensor, "*batch 1"],
+    ) -> Float[Tensor, "*batch feature_dim"]:
+        leading = observation.shape[:-1]
+        obs_flat = observation.reshape(-1, observation.shape[-1])
+        pose_flat = pose.reshape(-1, 3)
+        p_flat = progress.reshape(-1, 1)
+        x = torch.cat([obs_flat, pose_flat, p_flat], dim=1)
+        x = self.mlp(x)
+        return x.reshape(*leading, -1)
+
+
+class SofaActorNet(nn.Module):
+    """Actor network: observation + pose + progress -> action logits.
+
+    Uses a shared encoder (call .encoder to get the same instance for the
+    critic). Accepts either SofaEncoder (grid) or SofaBoundaryEncoder.
+    """
+
+    def __init__(
+        self,
+        feature_dim: int = 128,
+        n_actions: int = 27,
+        encoder: SofaEncoder | SofaBoundaryEncoder | None = None,
+    ) -> None:
+        super().__init__()
+        self.encoder = encoder if encoder is not None else SofaEncoder(feature_dim)
         self.head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim),
             nn.ReLU(),
@@ -62,10 +105,11 @@ class SofaActorNet(nn.Module):
 
     def forward(
         self,
-        observation: Float[Tensor, "*batch 2 H W"],
+        observation: Float[Tensor, "*batch 1 H W"],
+        pose: Float[Tensor, "*batch 3"],
         progress: Float[Tensor, "*batch 1"],
     ) -> Float[Tensor, "*batch n_actions"]:
-        features = self.encoder(observation, progress)
+        features = self.encoder(observation, pose, progress)
         return self.head(features)
 
 
@@ -75,7 +119,9 @@ class SofaCriticNet(nn.Module):
     Pass the actor's encoder at construction to share weights.
     """
 
-    def __init__(self, encoder: SofaEncoder, feature_dim: int = 128) -> None:
+    def __init__(
+        self, encoder: SofaEncoder | SofaBoundaryEncoder, feature_dim: int = 128
+    ) -> None:
         super().__init__()
         self.encoder = encoder
         self.head = nn.Sequential(
@@ -86,8 +132,9 @@ class SofaCriticNet(nn.Module):
 
     def forward(
         self,
-        observation: Float[Tensor, "*batch 2 H W"],
+        observation: Float[Tensor, "*batch 1 H W"],
+        pose: Float[Tensor, "*batch 3"],
         progress: Float[Tensor, "*batch 1"],
     ) -> Float[Tensor, "*batch 1"]:
-        features = self.encoder(observation, progress)
+        features = self.encoder(observation, pose, progress)
         return self.head(features)

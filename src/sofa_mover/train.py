@@ -12,15 +12,22 @@ from torchrl.modules import OneHotCategorical, ProbabilisticActor, ValueOperator
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 
-from sofa_mover.corridor import DEVICE, GridConfig
-from sofa_mover.env import SofaEnvConfig, make_sofa_env
+from sofa_mover.corridor import DEVICE
+from sofa_mover.env import make_sofa_env
 from sofa_mover.networks import SofaActorNet, SofaCriticNet
+from sofa_mover.obs_mode import (
+    ObsModeName,
+    estimate_max_num_envs,
+    make_encoder,
+    make_env_config,
+)
 from sofa_mover.evaluate import evaluate
 from sofa_mover.visualization.render import build_composite
 
 
 def train(
-    num_envs: int = 8,
+    obs_mode: ObsModeName = "baseline",
+    num_envs: int | str = "auto",
     total_frames: int = 2_000_000,
     rollout_length: int = 64,
     num_epochs: int = 4,
@@ -37,28 +44,34 @@ def train(
     log_dir: str = "runs/sofa_ppo",
     image_log_interval: int = 50,
 ) -> Path:
-    frames_per_batch = num_envs * rollout_length
+    # --- Config from obs mode ---
+    cfg = make_env_config(obs_mode)
+
+    # --- Resolve auto batch size ---
+    if num_envs == "auto":
+        resolved_num_envs = estimate_max_num_envs(cfg, rollout_length, device)
+        print(f"Auto batch size: {resolved_num_envs} (mode={obs_mode})")
+    else:
+        resolved_num_envs = int(num_envs)
+
+    frames_per_batch = resolved_num_envs * rollout_length
 
     output_path = Path(output_dir)
     output_path.mkdir(exist_ok=True)
     writer = SummaryWriter(log_dir=log_dir)
 
-    # --- Environment (256×256 grid, 8 envs to fit in 6GB GPU) ---
-    cfg = SofaEnvConfig(
-        sofa_config=GridConfig(grid_size=256, world_size=3.0),
-        template_config=GridConfig(grid_size=256, world_size=6.0),
-    )
-    env = make_sofa_env(num_envs=num_envs, cfg=cfg, device=device)
+    # --- Environment ---
+    env = make_sofa_env(num_envs=resolved_num_envs, cfg=cfg, device=device)
 
-    # --- Networks ---
-    actor_net = SofaActorNet().to(device)
-    # Critic shares the actor's encoder
+    # --- Networks (encoder selected from cfg) ---
+    encoder = make_encoder(cfg)
+    actor_net = SofaActorNet(encoder=encoder).to(device)
     critic_net = SofaCriticNet(encoder=actor_net.encoder).to(device)
 
     # Wrap actor for TorchRL
     actor_module = TensorDictModule(
         actor_net,
-        in_keys=["observation", "progress"],
+        in_keys=["observation", "pose", "progress"],
         out_keys=["logits"],
     )
     actor = ProbabilisticActor(
@@ -72,7 +85,7 @@ def train(
     # Wrap critic for TorchRL
     critic = ValueOperator(
         module=critic_net,
-        in_keys=["observation", "progress"],
+        in_keys=["observation", "pose", "progress"],
     )
 
     # --- PPO Loss ---
@@ -201,15 +214,19 @@ def train(
             writer.add_scalar("episode/total_distance", mean_total_distance, batch_idx)
             writer.add_scalar("episode/mean_area", mean_area, batch_idx)
 
-            # Periodic sofa image
-            if batch_idx % image_log_interval == 0:
+            # Periodic sofa image (only for grid modes — boundary obs is 1D)
+            if batch_idx % image_log_interval == 0 and cfg.boundary_rays == 0:
                 last_done_idx = done_mask.nonzero(as_tuple=False)[-1].item()
                 sofa_img = (
-                    data_flat_log["next", "observation"][last_done_idx, 0].cpu().numpy()
+                    data_flat_log["next", "observation"][last_done_idx, 0]
+                    .float()
+                    .cpu()
+                    .numpy()
                 )
-                mask_img = (
-                    data_flat_log["next", "observation"][last_done_idx, 1].cpu().numpy()
-                )
+                # Reconstruct corridor mask from pose for visualization
+                pose_td = data_flat_log["next", "pose"][last_done_idx].unsqueeze(0)
+                corridor_full = env.rasterizer.corridor_mask(pose_td)
+                mask_img = env._crop(corridor_full)[0, 0].cpu().numpy()
                 composite = build_composite(sofa_img, mask_img)
                 writer.add_image(
                     "episode/sofa_image", composite, batch_idx, dataformats="HWC"
@@ -260,9 +277,11 @@ def train(
     print(f"Training complete. Best mean terminal area: {best_mean_area:.4f}")
     print(f"Saved to {final_path}")
 
-    # Visualize the best policy
+    # Visualize the best policy (fall back to final if no best was saved)
+    best_path = output_path / "best_policy.pt"
+    eval_path = best_path if best_path.exists() else final_path
     evaluate(
-        checkpoint_path=str(output_path / "best_policy.pt"),
+        checkpoint_path=str(eval_path),
         output_path=str(output_path / "agent_trajectory.gif"),
         device=device,
     )
