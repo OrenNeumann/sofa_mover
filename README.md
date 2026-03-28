@@ -12,9 +12,9 @@ Three configurations trade off memory/speed vs observation richness:
 
 | Mode | Observation | Max batch size | Notes |
 |------|------------|---------------|-------|
-| `baseline` | Grid (1, 256, 171) uint8 | ~42 | Full resolution, safest for learning |
-| `safe` | Grid (1, 128, 85) uint8 | ~178 | 2x downsampled, good balance |
-| `aggressive` | Boundary (128,) float32 | 512+ | Polar ray-cast, fastest, least spatial info |
+| `baseline` | Grid (1, 256, 171) uint8 | ~256 | Full resolution, safest for learning |
+| `safe` | Grid (1, 128, 85) uint8 | ~512 | 2x downsampled, good balance |
+| `aggressive` | Boundary (128,) float32 | ~1024 | Polar ray-cast, fastest, least spatial info |
 
 ```bash
 # Default (baseline)

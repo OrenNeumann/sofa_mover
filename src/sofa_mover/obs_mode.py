@@ -62,8 +62,17 @@ def estimate_max_num_envs(
 ) -> int:
     """Estimate the maximum num_envs that fits in GPU memory.
 
-    Creates a 1-env probe to read observation dimensions, then uses a
-    heuristic with a 70% safety margin.
+    Creates a 1-env probe to read observation dimensions, then applies an
+    empirically calibrated formula:
+
+        per_env_peak ≈ 2.5 × obs_buffer_per_env + 2.24 MB
+
+    where obs_buffer_per_env = obs_numel × dtype_size × rollout_length × 2
+    (obs + next_obs stored by the TorchRL collector).
+
+    The 2.5× multiplier accounts for TorchRL internal copies and transient
+    tensors during policy inference. The 2.24 MB constant covers the sofa
+    state (float32), rasterizer intermediate peaks, and framework overhead.
     """
     props = torch.cuda.get_device_properties(device)
     total_mem = props.total_memory
@@ -81,22 +90,22 @@ def estimate_max_num_envs(
     del probe
     torch.cuda.empty_cache()
 
-    # Fixed overhead: network params + optimizer + loss module + collector internals
-    fixed_overhead = 500 * 1024 * 1024  # ~500 MB
+    # Fixed overhead: network params + optimizer + one PPO minibatch pass
+    fixed_overhead = 100 * 1024 * 1024  # ~100 MB
 
-    # Per-env per-step: obs + next_obs + action(27 float) + reward(1) + done(1)
-    #   + pose(3 float) + progress(1 float) + misc scalars
-    scalar_bytes_per_step = (27 + 1 + 1 + 3 + 1 + 5) * 4  # ~152 bytes
-    step_bytes = obs_bytes_per_step * 2 + scalar_bytes_per_step  # obs + next_obs
+    # Collector stores obs + next_obs per step for the full rollout
+    obs_buffer_per_env = obs_bytes_per_step * rollout_length * 2
 
-    # Total buffer per env over full rollout
-    buffer_per_env = step_bytes * rollout_length
+    # Empirical formula: per_env_peak ≈ 2.5 × obs_buffer + 2.24 MB
+    per_env_bytes = int(2.5 * obs_buffer_per_env + 2.24 * 1024 * 1024)
 
     available = total_mem - fixed_overhead
-    max_envs = int(available / buffer_per_env * 0.7)  # 70% safety margin
+    max_envs = int(available / per_env_bytes * 0.75)  # 75% safety margin
 
-    # Round down to power of 2 for GPU efficiency
+    # Round down to power of 2. GPU throughput saturates well before the memory
+    # limit (benchmarks show FPS flat or declining above 256/512/1024 for
+    # baseline/safe/aggressive), so over-provisioning just adds PPO overhead..
     if max_envs >= 2:
         max_envs = 2 ** (max_envs.bit_length() - 1)
 
-    return max(4, min(max_envs, 1024))
+    return max(4, min(max_envs, 2048))

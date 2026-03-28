@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import torch
+from tensordict import TensorDictBase
 from tqdm import tqdm
 from tensordict.nn import TensorDictModule
 from torch.utils.tensorboard import SummaryWriter
@@ -23,6 +24,36 @@ from sofa_mover.obs_mode import (
 )
 from sofa_mover.evaluate import evaluate
 from sofa_mover.visualization.render import build_composite
+
+
+def _compute_gae_minibatch(
+    data: TensorDictBase,
+    loss_module: ClipPPOLoss,
+    minibatch_size: int,
+) -> None:
+    """Compute GAE advantages in env-dimension chunks to avoid OOM.
+
+    Processing the full (B×T) buffer at once converts all uint8 obs to
+    float32 simultaneously (~5 GiB for B=256, T=64). Chunking along B
+    keeps peak memory proportional to minibatch_size.
+    """
+    B, T = data.shape
+    env_chunk = max(1, minibatch_size // T)
+    adv_key = loss_module.tensor_keys.advantage
+    vt_key = loss_module.tensor_keys.value_target
+    advantages, value_targets = [], []
+    with torch.no_grad():
+        for start in range(0, B, env_chunk):
+            chunk = data[start : start + env_chunk]
+            loss_module.value_estimator(
+                chunk,
+                params=loss_module.critic_network_params,
+                target_params=loss_module.target_critic_network_params,
+            )
+            advantages.append(chunk[adv_key])
+            value_targets.append(chunk[vt_key])
+    data.set(adv_key, torch.cat(advantages, dim=0))
+    data.set(vt_key, torch.cat(value_targets, dim=0))
 
 
 def train(
@@ -124,13 +155,9 @@ def train(
 
     for data in pbar:
         t0 = time.perf_counter()
-        # Compute GAE advantages
-        with torch.no_grad():
-            loss_module.value_estimator(
-                data,
-                params=loss_module.critic_network_params,
-                target_params=loss_module.target_critic_network_params,
-            )
+        # Compute GAE advantages in minibatches (avoids converting the full
+        # obs buffer to float32 at once, which OOMs for large B)
+        _compute_gae_minibatch(data, loss_module, minibatch_size)
 
         # Flatten time dimension for minibatch iteration
         data_flat = data.reshape(-1)
@@ -226,7 +253,12 @@ def train(
                 # Reconstruct corridor mask from pose for visualization
                 pose_td = data_flat_log["next", "pose"][last_done_idx].unsqueeze(0)
                 corridor_full = env.rasterizer.corridor_mask(pose_td)
-                mask_img = env._crop(corridor_full)[0, 0].cpu().numpy()
+                mask_img = (
+                    env._downscale_obs(env._crop(corridor_full).to(torch.uint8))[0, 0]
+                    .float()
+                    .cpu()
+                    .numpy()
+                )
                 composite = build_composite(sofa_img, mask_img)
                 writer.add_image(
                     "episode/sofa_image", composite, batch_idx, dataformats="HWC"
