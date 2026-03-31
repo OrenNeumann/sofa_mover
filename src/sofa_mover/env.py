@@ -38,6 +38,8 @@ class SofaEnvConfig:
     lambda_progress: float = 1.0
     min_area_fraction: float = 0.05
     initial_pose: tuple[float, float, float] = (0.0, 2.0, 0.0)
+    # Max y in corridor coords for the initial sofa region.
+    start_y_max: float = -1.5
     # Goal point in corridor-centric coords (middle of exit end)
     goal_point: tuple[float, float] = (2.0, 0.0)
     goal_radius: float = 0.3
@@ -139,7 +141,9 @@ class SofaEnv(EnvBase):
         # Initial area and goal distance (single mask computation)
         self.cell_area = (cfg.sofa_config.world_size / H) ** 2
         init_pose = torch.tensor([list(cfg.initial_pose)], device=device)
-        init_mask = self.rasterizer.corridor_mask(init_pose)
+        # Clip initial sofa to the start region of the vertical leg
+        self._start_mask = self._compute_start_mask(init_pose, cfg, device)
+        init_mask = self.rasterizer.corridor_mask(init_pose) * self._start_mask
 
         # Compute crop bounding box from initial sofa (sofa can only shrink)
         self._crop_y, self._crop_x = self._bbox(init_mask)
@@ -236,6 +240,25 @@ class SofaEnv(EnvBase):
         )
 
     @staticmethod
+    def _compute_start_mask(
+        pose: Pose,
+        cfg: SofaEnvConfig,
+        device: torch.device,
+    ) -> Float[Tensor, "1 1 H W"]:
+        """Compute a mask clipping sofa pixels to cy <= start_y_max in corridor coords."""
+        H = cfg.sofa_config.grid_size
+        half = cfg.sofa_config.world_size / 2
+        coords = torch.linspace(-half, half, H, device=device)
+        y_grid, x_grid = torch.meshgrid(coords, coords, indexing="ij")
+
+        tx, ty, theta = pose[0, 0], pose[0, 1], pose[0, 2]
+        cos_t, sin_t = torch.cos(theta), torch.sin(theta)
+        dx = x_grid - tx
+        dy = y_grid - ty
+        cy = -sin_t * dx + cos_t * dy
+        return (cy <= cfg.start_y_max).float().unsqueeze(0).unsqueeze(0)
+
+    @staticmethod
     def _bbox(mask: Float[Tensor, "1 1 H W"]) -> tuple[slice, slice]:
         """Bounding box (y_slice, x_slice) of nonzero pixels."""
         nz = mask[0, 0].nonzero(as_tuple=True)
@@ -269,6 +292,7 @@ class SofaEnv(EnvBase):
             H = self.cfg.sofa_config.grid_size
             fresh_sofa = torch.ones(n_reset, 1, H, H, device=device)
             initial_mask = self.rasterizer.corridor_mask(initial_pose)
+            initial_mask = initial_mask * self._start_mask
             fresh_sofa = self._crop(erode(fresh_sofa, initial_mask))
 
             self._sofa[reset_mask] = fresh_sofa

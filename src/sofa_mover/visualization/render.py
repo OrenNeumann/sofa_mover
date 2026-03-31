@@ -1,5 +1,12 @@
 """Rendering utilities for sofa erosion trajectory videos."""
 
+import warnings
+
+from tqdm import TqdmExperimentalWarning
+from tqdm.rich import tqdm
+
+warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -78,20 +85,29 @@ def render_trajectory(
     sofa_config: GridConfig,
     output_path: Path,
     fps: int = 10,
+    extent: tuple[float, float, float, float] | None = None,
 ) -> Path:
     """Render a sequence of frames into an animated gif.
 
     Produces a two-panel animation: composite sofa/corridor image on the left,
     area-over-time plot on the right.
+
+    Args:
+        extent: World-coordinate extent (x_min, x_max, y_min, y_max) of the
+            frame data. If None, uses the full sofa_config world size.
     """
     fig, (ax_img, ax_plot) = plt.subplots(1, 2, figsize=(12, 5))
 
-    half = sofa_config.world_size / 2
-    extent = [-half, half, -half, half]
+    if extent is not None:
+        x_min, x_max, y_min, y_max = extent
+        img_extent = [x_min, x_max, y_min, y_max]
+    else:
+        half = sofa_config.world_size / 2
+        img_extent = [-half, half, -half, half]
 
     # Initialize image panel
     composite = build_composite(frames[0].sofa, frames[0].corridor_mask)
-    img_artist = ax_img.imshow(composite, origin="lower", extent=extent)
+    img_artist = ax_img.imshow(composite, origin="lower", extent=img_extent)
     ax_img.set_xlabel("x")
     ax_img.set_ylabel("y")
     ax_img.set_aspect("equal")
@@ -130,7 +146,10 @@ def render_trajectory(
 
     gif_path = output_path.with_suffix(".gif")
     writer = matplotlib.animation.PillowWriter(fps=fps)
-    anim.save(str(gif_path), writer=writer)
+    with tqdm(total=len(frames), desc="Rendering", unit="frame") as pbar:
+        anim.save(
+            str(gif_path), writer=writer, progress_callback=lambda i, n: pbar.update(1)
+        )
 
     plt.close(fig)
     return gif_path

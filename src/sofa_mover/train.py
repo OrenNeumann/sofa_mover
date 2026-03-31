@@ -1,11 +1,18 @@
 """PPO training script for the sofa moving problem."""
 
+import warnings
+
+from tqdm import TqdmExperimentalWarning
+from tqdm.rich import tqdm
+
+warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
+
 import time
+
 from pathlib import Path
 
 import torch
 from tensordict import TensorDictBase
-from tqdm import tqdm
 from tensordict.nn import TensorDictModule
 from torch.utils.tensorboard import SummaryWriter
 from torchrl.collectors import SyncDataCollector
@@ -150,10 +157,9 @@ def train(
     # --- Training loop ---
     best_mean_area = 0.0
     batch_idx = 0
-    total_batches = total_frames // frames_per_batch
-    pbar = tqdm(collector, total=total_batches, desc="Training", unit="batch")
+    pbar = tqdm(total=total_frames, desc="Training", unit="step", unit_scale=True)
 
-    for data in pbar:
+    for data in collector:
         t0 = time.perf_counter()
         # Compute GAE advantages in minibatches (avoids converting the full
         # obs buffer to float32 at once, which OOMs for large B)
@@ -288,8 +294,10 @@ def train(
                 output_path / "best_policy.pt",
             )
 
+        pbar.update(frames_per_batch)
         batch_idx += 1
 
+    pbar.close()
     collector.shutdown()
     writer.close()
 
@@ -322,4 +330,18 @@ def train(
 
 
 if __name__ == "__main__":
-    train()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="PPO training for the sofa moving problem."
+    )
+    parser.add_argument(
+        "--obs-mode", default="aggressive", choices=["baseline", "safe", "aggressive"]
+    )
+    parser.add_argument("--num-envs", default="auto")
+    args = parser.parse_args()
+
+    train(
+        obs_mode=args.obs_mode,
+        num_envs=args.num_envs if args.num_envs == "auto" else int(args.num_envs),
+    )

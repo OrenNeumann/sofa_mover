@@ -46,23 +46,30 @@ def evaluate(
     actor.eval()
 
     # Deterministic rollout — pose lives in env._pose (internal state)
+    H = cfg.sofa_config.grid_size
     frames: list[FrameData] = []
+
+    def _collect_frame(step: int) -> None:
+        pose_tuple = (
+            env._pose[0, 0].item(),
+            env._pose[0, 1].item(),
+            env._pose[0, 2].item(),
+        )
+        # Reconstruct full grid from cropped sofa for visualization
+        full_sofa = torch.zeros(1, 1, H, H, device=device)
+        full_sofa[:, :, env._crop_y, env._crop_x] = env._sofa.float()
+        corridor_full = env.rasterizer.corridor_mask(env._pose)
+        frames.append(
+            compute_frame_data(
+                step, pose_tuple, full_sofa, corridor_full, cfg.sofa_config
+            )
+        )
+
     with torch.no_grad():
         td = env.reset()
 
         for step in range(cfg.max_steps):
-            pose_tuple = (
-                env._pose[0, 0].item(),
-                env._pose[0, 1].item(),
-                env._pose[0, 2].item(),
-            )
-            # For boundary mode, obs is 1D — use internal sofa grid for viz
-            sofa = env._sofa.float()  # (1, 1, crop_h, crop_w)
-            corridor_full = env.rasterizer.corridor_mask(env._pose)
-            mask = env._crop(corridor_full)
-            frames.append(
-                compute_frame_data(step, pose_tuple, sofa, mask, cfg.sofa_config)
-            )
+            _collect_frame(step)
 
             # Greedy action: argmax logits
             td = actor_module(td)
@@ -74,20 +81,7 @@ def evaluate(
             td = env.step(td)["next"]
 
             if td["done"].all():
-                # Final frame
-                pose_tuple = (
-                    env._pose[0, 0].item(),
-                    env._pose[0, 1].item(),
-                    env._pose[0, 2].item(),
-                )
-                sofa = env._sofa.float()
-                corridor_full = env.rasterizer.corridor_mask(env._pose)
-                mask = env._crop(corridor_full)
-                frames.append(
-                    compute_frame_data(
-                        step + 1, pose_tuple, sofa, mask, cfg.sofa_config
-                    )
-                )
+                _collect_frame(step + 1)
                 break
 
     out = Path(output_path)

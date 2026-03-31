@@ -61,7 +61,9 @@ class TestReset:
     def test_sofa_is_carved(self, env) -> None:
         env.reset()
         sofa = env._sofa
-        assert sofa.sum() < sofa.numel()
+        H = env.cfg.sofa_config.grid_size
+        full_grid_pixels = NUM_ENVS * H * H
+        assert sofa.sum() < full_grid_pixels
         assert sofa.sum() > 0
 
     def test_initial_progress_zero(self, env) -> None:
