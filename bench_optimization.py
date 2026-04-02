@@ -1,4 +1,5 @@
-"""Benchmark script for obs mode configurations.
+"""Benchmark script for obs mode configurations. Temporary, replace
+with proper benchmarking.
 
 Measures per mode:
   1. Max batch size that fits in GPU memory (binary search)
@@ -11,16 +12,16 @@ import time
 from dataclasses import dataclass
 
 import torch
-from tensordict.nn import TensorDictModule
-from torchrl.collectors import SyncDataCollector
-from torchrl.modules import OneHotCategorical, ProbabilisticActor, ValueOperator
-from torchrl.objectives import ClipPPOLoss
-from torchrl.objectives.value import GAE
 
 from sofa_mover.corridor import DEVICE
-from sofa_mover.env import SofaEnvConfig, make_sofa_env
-from sofa_mover.networks import SofaActorNet, SofaCriticNet
-from sofa_mover.obs_mode import ObsModeName, make_encoder, make_env_config
+from sofa_mover.env import SofaEnvConfig
+from sofa_mover.obs_mode import ObsModeName, make_env_config
+from sofa_mover.training.config import TrainingConfig, resolve_training_config
+from sofa_mover.training.stack import (
+    TrainingStack,
+    build_training_stack as build_runtime_training_stack,
+)
+from sofa_mover.training.utils import compute_gae_minibatch, optimize_ppo_epochs
 
 
 def gpu_mem_mb() -> float:
@@ -52,54 +53,32 @@ def build_training_stack(
     cfg: SofaEnvConfig,
     rollout_length: int = 64,
     device: torch.device = DEVICE,
-) -> tuple[SyncDataCollector, ClipPPOLoss, torch.optim.Optimizer, ProbabilisticActor]:
+) -> TrainingStack:
     """Build the full training stack (env + networks + collector + loss)."""
-    env = make_sofa_env(num_envs=num_envs, cfg=cfg, device=device)
-
-    encoder = make_encoder(cfg)
-    actor_net = SofaActorNet(encoder=encoder).to(device)
-    critic_net = SofaCriticNet(encoder=actor_net.encoder).to(device)
-
-    actor_module = TensorDictModule(
-        actor_net,
-        in_keys=["observation", "pose", "progress"],
-        out_keys=["logits"],
-    )
-    actor = ProbabilisticActor(
-        module=actor_module,
-        in_keys=["logits"],
-        out_keys=["action"],
-        distribution_class=OneHotCategorical,
-        return_log_prob=True,
-    )
-
-    critic = ValueOperator(
-        module=critic_net,
-        in_keys=["observation", "pose", "progress"],
-    )
-
-    loss_module = ClipPPOLoss(
-        actor_network=actor,
-        critic_network=critic,
-        clip_epsilon=0.2,
-        entropy_bonus=True,
-        entropy_coeff=0.01,
-        critic_coeff=1.0,
-    )
-    loss_module.make_value_estimator(GAE, gamma=0.99, lmbda=0.95, value_network=critic)
-
-    optimizer = torch.optim.Adam(loss_module.parameters(), lr=3e-4)
-
-    frames_per_batch = num_envs * rollout_length
-    collector = SyncDataCollector(
-        create_env_fn=env,
-        policy=actor,
-        frames_per_batch=frames_per_batch,
-        total_frames=frames_per_batch * 100,
+    config = TrainingConfig(
+        num_envs=num_envs,
+        total_frames=num_envs * rollout_length * 100,
+        rollout_length=rollout_length,
         device=device,
     )
+    env_cfg, resolved_num_envs = resolve_training_config(config, env_cfg=cfg)
+    return build_runtime_training_stack(config, env_cfg, resolved_num_envs)
 
-    return collector, loss_module, optimizer, actor
+
+def _warmup_training_step(stack: TrainingStack, minibatch_size: int) -> None:
+    """Run one warmup PPO step."""
+    warmup_data = next(iter(stack.collector))
+    compute_gae_minibatch(warmup_data, stack.loss_module, minibatch_size)
+    warmup_flat = warmup_data.reshape(-1)
+    optimize_ppo_epochs(
+        warmup_flat,
+        stack.loss_module,
+        stack.optimizer,
+        num_epochs=1,
+        minibatch_size=minibatch_size,
+        max_grad_norm=0.5,
+        device=stack.env.device,
+    )
 
 
 def bench_training(
@@ -112,32 +91,14 @@ def bench_training(
     cleanup()
     reset_gpu_stats()
 
-    collector = None
+    stack: TrainingStack | None = None
     try:
-        collector, loss_module, optimizer, actor = build_training_stack(
-            num_envs, cfg=cfg, rollout_length=rollout_length
-        )
+        stack = build_training_stack(num_envs, cfg=cfg, rollout_length=rollout_length)
 
         frames_per_batch = num_envs * rollout_length
 
         # Warmup: 1 batch
-        warmup_data = next(iter(collector))
-        with torch.no_grad():
-            loss_module.value_estimator(
-                warmup_data,
-                params=loss_module.critic_network_params,
-                target_params=loss_module.target_critic_network_params,
-            )
-        data_flat = warmup_data.reshape(-1)
-        mb = data_flat[: min(512, data_flat.shape[0])]
-        loss_td = loss_module(mb)
-        loss = (
-            loss_td["loss_objective"] + loss_td["loss_critic"] + loss_td["loss_entropy"]
-        )
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        del warmup_data, data_flat, mb, loss_td, loss
+        _warmup_training_step(stack, minibatch_size=512)
 
         # Timed runs
         reset_gpu_stats()
@@ -146,34 +107,18 @@ def bench_training(
         total_frames = 0
 
         batch_count = 0
-        for data in collector:
-            with torch.no_grad():
-                loss_module.value_estimator(
-                    data,
-                    params=loss_module.critic_network_params,
-                    target_params=loss_module.target_critic_network_params,
-                )
-
+        for data in stack.collector:
+            compute_gae_minibatch(data, stack.loss_module, minibatch_size=512)
             data_flat = data.reshape(-1)
-            total_samples = data_flat.shape[0]
-
-            for _epoch in range(4):
-                perm = torch.randperm(total_samples, device=DEVICE)
-                for mb_start in range(0, total_samples, 512):
-                    mb_end = min(mb_start + 512, total_samples)
-                    mb_idx = perm[mb_start:mb_end]
-                    mb = data_flat[mb_idx]
-
-                    loss_td = loss_module(mb)
-                    loss = (
-                        loss_td["loss_objective"]
-                        + loss_td["loss_critic"]
-                        + loss_td["loss_entropy"]
-                    )
-                    optimizer.zero_grad()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(loss_module.parameters(), 0.5)
-                    optimizer.step()
+            optimize_ppo_epochs(
+                data_flat,
+                stack.loss_module,
+                stack.optimizer,
+                num_epochs=4,
+                minibatch_size=512,
+                max_grad_norm=0.5,
+                device=stack.env.device,
+            )
 
             total_frames += frames_per_batch
             batch_count += 1
@@ -192,8 +137,8 @@ def bench_training(
             return BenchResult(num_envs=num_envs, fps=0, peak_mem_mb=0, success=False)
         raise
     finally:
-        if collector is not None:
-            collector.shutdown()
+        if stack is not None:
+            stack.collector.shutdown()
         cleanup()
 
 

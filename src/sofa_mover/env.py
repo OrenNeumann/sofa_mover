@@ -316,6 +316,7 @@ class SofaEnv(EnvBase):
             self.initial_goal_dist, 1e-8
         )
 
+        # TODO: observation should also include sofa pose
         return TensorDict(
             {
                 "observation": observation,

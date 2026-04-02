@@ -8,6 +8,8 @@ __pycache__/
 Thumbs.db
 
 .claude/
+AGENTS.md
+.codex
 
 output/
 runs/

@@ -17,7 +17,7 @@ Three configurations trade off memory/speed vs observation richness:
 | `aggressive` | Boundary (128,) float32 | ~1024 | Polar ray-cast, fastest, least spatial info |
 
 ```bash
-# Default (baseline)
+# Default (aggressive)
 uv run python -m sofa_mover.train
 
 # Downsampled grid
