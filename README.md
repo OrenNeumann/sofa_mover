@@ -3,7 +3,7 @@
 ## Training
 
 ```bash
-uv run python -m sofa_mover.train
+uv run python -m sofa_mover.training.train
 ```
 
 ## Visualization
