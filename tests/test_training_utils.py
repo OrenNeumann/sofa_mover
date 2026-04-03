@@ -76,7 +76,11 @@ def test_extract_episode_metrics_aggregates_done_episodes() -> None:
 def test_maybe_build_episode_composite_skips_boundary_mode() -> None:
     env = make_sofa_env(
         num_envs=1,
-        cfg=SofaEnvConfig(boundary_rays=8, compile_rasterizer=False),
+        cfg=SofaEnvConfig(
+            observation_type="boundary",
+            boundary_rays=8,
+            compile_rasterizer=False,
+        ),
         device=torch.device("cpu"),
     )
     next_td = TensorDict(

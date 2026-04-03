@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from tensordict import TensorDictBase
-from torch.utils.tensorboard import SummaryWriter
 from torchrl.objectives import ClipPPOLoss
 
 from sofa_mover.env import SofaEnv
@@ -163,23 +162,6 @@ def extract_episode_metrics(data_flat: TensorDictBase) -> EpisodeMetrics | None:
     )
 
 
-def log_episode_metrics(
-    writer: SummaryWriter,
-    metrics: EpisodeMetrics | None,
-    batch_idx: int,
-) -> None:
-    """Log aggregated episode metrics."""
-    if metrics is None:
-        return
-
-    writer.add_scalar("episode/terminal_area", metrics.mean_terminal_area, batch_idx)
-    writer.add_scalar("episode/truncation_rate", metrics.truncation_rate, batch_idx)
-    writer.add_scalar("episode/episode_length", metrics.mean_ep_length, batch_idx)
-    writer.add_scalar("episode/total_angle", metrics.mean_total_angle, batch_idx)
-    writer.add_scalar("episode/total_distance", metrics.mean_total_distance, batch_idx)
-    writer.add_scalar("episode/mean_area", metrics.mean_area, batch_idx)
-
-
 def maybe_build_episode_composite(
     data_flat: TensorDictBase,
     env: SofaEnv,
@@ -189,7 +171,7 @@ def maybe_build_episode_composite(
 ) -> np.ndarray | None:
     """Build a composite sofa image when image logging is enabled."""
     # Periodic sofa image (only for grid modes — boundary obs is 1D)
-    if batch_idx % image_log_interval != 0 or env.cfg.boundary_rays > 0:
+    if batch_idx % image_log_interval != 0 or env.cfg.observation_type == "boundary":
         return None
 
     sofa_img = data_flat["next", "observation"][last_done_idx, 0].float().cpu().numpy()

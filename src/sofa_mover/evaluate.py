@@ -6,8 +6,8 @@ import torch
 
 from sofa_mover.corridor import DEVICE
 from sofa_mover.env import SofaEnvConfig, make_sofa_env
-from sofa_mover.networks import SofaActorNet
-from sofa_mover.obs_mode import make_encoder
+from sofa_mover.networks import SofaActorNet, SofaBoundaryEncoder, SofaEncoder
+from sofa_mover.training.config import TrainingConfig
 from sofa_mover.visualization.render import (
     FrameData,
     compute_frame_data,
@@ -23,13 +23,18 @@ def evaluate(
     device: torch.device = DEVICE,
 ) -> Path:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    cfg: SofaEnvConfig = checkpoint["cfg"]
+    training_config: TrainingConfig = checkpoint["config"]
+    cfg: SofaEnvConfig = training_config.env
 
     # Single-env for visualization
     env = make_sofa_env(num_envs=1, cfg=cfg, device=device)
 
     # Rebuild actor with the correct encoder for this checkpoint's config
-    encoder = make_encoder(cfg)
+    encoder: SofaEncoder | SofaBoundaryEncoder
+    if cfg.observation_type == "boundary":
+        encoder = SofaBoundaryEncoder(n_rays=cfg.boundary_rays)
+    else:
+        encoder = SofaEncoder()
     actor_net = SofaActorNet(encoder=encoder).to(device)
     actor_module = TensorDictModule(
         actor_net,

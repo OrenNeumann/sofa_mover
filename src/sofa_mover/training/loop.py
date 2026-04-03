@@ -4,16 +4,16 @@ import time
 from pathlib import Path
 
 import torch
-from torch.utils.tensorboard import SummaryWriter
 from tqdm.rich import tqdm
+from wandb.sdk import init as wandb_init
+from wandb.sdk.data_types.image import Image
 
 from sofa_mover.evaluate import evaluate
-from sofa_mover.training.config import TrainingConfig, resolve_training_config
+from sofa_mover.training.config import TrainingConfig
 from sofa_mover.training.stack import build_training_stack
 from sofa_mover.training.utils import (
     compute_gae_minibatch,
     extract_episode_metrics,
-    log_episode_metrics,
     maybe_build_episode_composite,
     optimize_ppo_epochs,
 )
@@ -22,16 +22,17 @@ from sofa_mover.training.utils import (
 def run_training(config: TrainingConfig) -> Path:
     """Run PPO training for the sofa moving problem."""
 
-    env_cfg, num_envs = resolve_training_config(config)
-    frames_per_batch = num_envs * config.rollout_length
     output_path = Path(config.output_dir)
     output_path.mkdir(exist_ok=True)
-    writer = SummaryWriter(log_dir=config.log_dir)
-    stack = build_training_stack(config, env_cfg, num_envs)
+    run = wandb_init(project=config.wandb_project)
+    run.define_metric("env_steps")
+    run.define_metric("*", step_metric="env_steps")
+    stack = build_training_stack(config)
 
     # --- Training loop ---
     best_mean_area = 0.0
     batch_idx = 0
+    total_env_steps = 0
     pbar = tqdm(
         total=config.total_frames,
         desc="Training",
@@ -58,22 +59,34 @@ def run_training(config: TrainingConfig) -> Path:
         )
 
         # --- Logging ---
+        batch_frames = data.numel()
+        total_env_steps += batch_frames
         elapsed = time.perf_counter() - t0
-        fps = frames_per_batch / elapsed
+        fps = batch_frames / elapsed
 
-        # Per-batch TensorBoard scalars
         mean_reward = data["next", "reward"].flatten().mean().item()
-        writer.add_scalar("train/fps", fps, batch_idx)
-        writer.add_scalar("train/mean_reward", mean_reward, batch_idx)
-        writer.add_scalar("loss/policy", optimization_stats.loss_policy, batch_idx)
-        writer.add_scalar("loss/critic", optimization_stats.loss_critic, batch_idx)
-        writer.add_scalar("loss/entropy", optimization_stats.loss_entropy, batch_idx)
-        writer.add_scalar("train/grad_norm", optimization_stats.grad_norm, batch_idx)
+        log_payload: dict[str, float | int | Image] = {
+            "env_steps": total_env_steps,
+            "train/fps": fps,
+            "train/mean_reward": mean_reward,
+            "loss/policy": optimization_stats.loss_policy,
+            "loss/critic": optimization_stats.loss_critic,
+            "loss/entropy": optimization_stats.loss_entropy,
+            "train/grad_norm": optimization_stats.grad_norm,
+        }
 
         episode_metrics = extract_episode_metrics(data_flat)
-        log_episode_metrics(writer, episode_metrics, batch_idx)
-
         if episode_metrics is not None:
+            log_payload.update(
+                {
+                    "episode/terminal_area": episode_metrics.mean_terminal_area,
+                    "episode/truncation_rate": episode_metrics.truncation_rate,
+                    "episode/episode_length": episode_metrics.mean_ep_length,
+                    "episode/total_angle": episode_metrics.mean_total_angle,
+                    "episode/total_distance": episode_metrics.mean_total_distance,
+                    "episode/mean_area": episode_metrics.mean_area,
+                }
+            )
             composite = maybe_build_episode_composite(
                 data_flat,
                 stack.env,
@@ -82,12 +95,9 @@ def run_training(config: TrainingConfig) -> Path:
                 last_done_idx=episode_metrics.last_done_idx,
             )
             if composite is not None:
-                writer.add_image(
-                    "episode/sofa_image",
-                    composite,
-                    batch_idx,
-                    dataformats="HWC",
-                )
+                log_payload["episode/sofa_image"] = Image(composite)
+
+        run.log(log_payload)
 
         pbar.set_postfix(
             fps=f"{fps:,.0f}",
@@ -111,17 +121,17 @@ def run_training(config: TrainingConfig) -> Path:
                     "actor": dict(stack.actor.state_dict()),
                     "critic": dict(stack.critic.state_dict()),
                     "encoder": dict(stack.actor_net.encoder.state_dict()),
-                    "cfg": stack.env.cfg,
+                    "config": config,
                     "batch_idx": batch_idx,
                     "best_mean_area": best_mean_area,
                 },
                 output_path / "best_policy.pt",
             )
 
-        pbar.update(frames_per_batch)
+        pbar.update(batch_frames)
         batch_idx += 1
 
-    writer.close()
+    run.finish()
 
     # Save final
     final_path = output_path / "final_policy.pt"
@@ -130,7 +140,7 @@ def run_training(config: TrainingConfig) -> Path:
             "actor": dict(stack.actor.state_dict()),
             "critic": dict(stack.critic.state_dict()),
             "encoder": dict(stack.actor_net.encoder.state_dict()),
-            "cfg": stack.env.cfg,
+            "config": config,
             "batch_idx": batch_idx,
             "best_mean_area": best_mean_area,
         },

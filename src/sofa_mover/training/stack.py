@@ -9,9 +9,13 @@ from torchrl.modules import OneHotCategorical, ProbabilisticActor, ValueOperator
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 
-from sofa_mover.env import SofaEnv, SofaEnvConfig, make_sofa_env
-from sofa_mover.networks import SofaActorNet, SofaCriticNet
-from sofa_mover.obs_mode import make_encoder
+from sofa_mover.env import SofaEnv, make_sofa_env
+from sofa_mover.networks import (
+    SofaActorNet,
+    SofaBoundaryEncoder,
+    SofaCriticNet,
+    SofaEncoder,
+)
 from sofa_mover.training.config import TrainingConfig
 
 
@@ -30,11 +34,11 @@ class TrainingStack:
 
 def build_training_stack(
     config: TrainingConfig,
-    env_cfg: SofaEnvConfig,
-    num_envs: int,
 ) -> TrainingStack:
     """Build env, modules, loss, optimizer, and collector."""
     device = config.device
+    num_envs = config.num_envs
+    env_cfg = config.env
 
     # --- Environment ---
     env = make_sofa_env(
@@ -44,7 +48,11 @@ def build_training_stack(
     )
 
     # --- Networks (encoder selected from cfg) ---
-    encoder = make_encoder(env_cfg)
+    encoder: SofaEncoder | SofaBoundaryEncoder
+    if env_cfg.observation_type == "boundary":
+        encoder = SofaBoundaryEncoder(n_rays=env_cfg.boundary_rays)
+    else:  # "grid"
+        encoder = SofaEncoder()
     actor_net = SofaActorNet(encoder=encoder).to(device)
     critic_net = SofaCriticNet(encoder=actor_net.encoder).to(device)
 

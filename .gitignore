@@ -12,5 +12,6 @@ AGENTS.md
 .codex
 
 output/
+wandb/
 runs/
 docs/

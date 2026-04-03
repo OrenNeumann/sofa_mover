@@ -15,7 +15,7 @@ dependencies = [
     "jaxtyping",
     "tqdm>=4.67.3",
     "rich>=14.3.3",
-    "setuptools<81",  # for tensorboard
+    "wandb>=0.21.1",
 ]
 
 [dependency-groups]
@@ -26,7 +26,6 @@ dev = [
     "pre-commit>=4.5.1",
     "pytest",
     "ruff>=0.15.5",
-    "tensorboard>=2.20.0",
 ]
 
 [tool.pytest.ini_options]

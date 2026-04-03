@@ -2,6 +2,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -21,6 +22,8 @@ from sofa_mover.corridor import (
 )
 from sofa_mover.erosion import erode
 from sofa_mover.rasterize import Rasterizer
+
+ObservationType = Literal["grid", "boundary"]
 
 
 @dataclass(frozen=True)
@@ -43,10 +46,13 @@ class SofaEnvConfig:
     # Goal point in corridor-centric coords (middle of exit end)
     goal_point: tuple[float, float] = (2.0, 0.0)
     goal_radius: float = 0.3
-    # Observation downscale factor (1 = full res, 2 = half, 4 = quarter)
+    observation_type: ObservationType = "boundary"
+    # Grid observation downscale factor (1 = full res, 2 = half, 4 = quarter)
+    # Only used for "grid" obs.
     obs_downscale: int = 1
-    # Boundary observation: number of rays (0 = use grid, >0 = use boundary profile)
-    boundary_rays: int = 0
+    # Boundary observation: number of rays sampled from the sofa contour.
+    # Only used for "boundary" obs.
+    boundary_rays: int = 128
 
 
 def _goal_corridor_to_sofa(
@@ -170,7 +176,7 @@ class SofaEnv(EnvBase):
         self._episode_area_integral = torch.zeros(num_envs, 1, device=device)
 
         # Boundary ray-casting setup (if enabled)
-        if cfg.boundary_rays > 0:
+        if cfg.observation_type == "boundary":
             self._boundary = BoundaryExtractor(
                 cfg.boundary_rays, init_cropped[0, 0], device
             )
@@ -191,7 +197,7 @@ class SofaEnv(EnvBase):
         B = self.num_envs
 
         _unbounded_b1 = dict(shape=(B, 1), dtype=torch.float32, device=self.device)
-        if self.cfg.boundary_rays > 0:
+        if self.cfg.observation_type == "boundary":
             obs_spec = Bounded(
                 low=0.0,
                 high=1.0,
@@ -199,7 +205,7 @@ class SofaEnv(EnvBase):
                 dtype=torch.float32,
                 device=self.device,
             )
-        else:
+        else:  # "grid"
             obs_spec = Bounded(
                 low=0,
                 high=1,
@@ -303,9 +309,9 @@ class SofaEnv(EnvBase):
             self._episode_area_integral[reset_mask] = 0.0
 
         # Build observation
-        if self.cfg.boundary_rays > 0:
+        if self.cfg.observation_type == "boundary":
             observation = self._boundary(self._sofa)
-        else:
+        else:  # "grid"
             observation = self._downscale_obs(self._sofa.to(torch.uint8))
 
         # Progress = 1 - (dist_to_goal / initial_dist)
@@ -399,9 +405,9 @@ class SofaEnv(EnvBase):
         self._goal_dist = goal_dist
 
         # Observation
-        if self.cfg.boundary_rays > 0:
+        if self.cfg.observation_type == "boundary":
             observation = self._boundary(new_sofa)
-        else:
+        else:  # "grid"
             observation = self._downscale_obs(new_sofa.to(torch.uint8))
 
         # Progress = 1 - (dist_to_goal / initial_dist)

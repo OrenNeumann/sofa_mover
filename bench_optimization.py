@@ -1,7 +1,7 @@
-"""Benchmark script for obs mode configurations. Temporary, replace
+"""Benchmark script for observation configurations. Temporary, replace
 with proper benchmarking.
 
-Measures per mode:
+Measures per config:
   1. Max batch size that fits in GPU memory (binary search)
   2. Training FPS at max batch size
   3. Peak GPU memory usage
@@ -15,8 +15,7 @@ import torch
 
 from sofa_mover.corridor import DEVICE
 from sofa_mover.env import SofaEnvConfig
-from sofa_mover.obs_mode import ObsModeName, make_env_config
-from sofa_mover.training.config import TrainingConfig, resolve_training_config
+from sofa_mover.training.config import TrainingConfig
 from sofa_mover.training.stack import (
     TrainingStack,
     build_training_stack as build_runtime_training_stack,
@@ -56,13 +55,13 @@ def build_training_stack(
 ) -> TrainingStack:
     """Build the full training stack (env + networks + collector + loss)."""
     config = TrainingConfig(
+        env=cfg,
         num_envs=num_envs,
         total_frames=num_envs * rollout_length * 100,
         rollout_length=rollout_length,
         device=device,
     )
-    env_cfg, resolved_num_envs = resolve_training_config(config, env_cfg=cfg)
-    return build_runtime_training_stack(config, env_cfg, resolved_num_envs)
+    return build_runtime_training_stack(config)
 
 
 def _warmup_training_step(stack: TrainingStack, minibatch_size: int) -> None:
@@ -160,16 +159,25 @@ def find_max_batch_size(cfg: SofaEnvConfig, lo: int = 4, hi: int = 512) -> int:
 
 
 def bench_all_modes() -> None:
-    """Find max B and benchmark FPS at max B for all three obs modes."""
-    modes: list[ObsModeName] = ["baseline", "safe", "aggressive"]
+    """Find max B and benchmark FPS for representative observation configs."""
+    configs: tuple[tuple[str, SofaEnvConfig], ...] = (
+        ("grid", SofaEnvConfig(observation_type="grid")),
+        ("grid_downscaled", SofaEnvConfig(observation_type="grid", obs_downscale=2)),
+        (
+            "boundary",
+            SofaEnvConfig(observation_type="boundary", boundary_rays=128),
+        ),
+    )
     results: dict[str, tuple[int, BenchResult]] = {}
 
-    for mode in modes:
-        cfg = make_env_config(mode)
+    for name, cfg in configs:
         print(f"\n{'='*60}")
-        print(f"  MODE: {mode}")
+        print(f"  CONFIG: {name}")
         print(
-            f"  Config: obs_downscale={cfg.obs_downscale}, boundary_rays={cfg.boundary_rays}"
+            "  Config: "
+            f"observation_type={cfg.observation_type}, "
+            f"obs_downscale={cfg.obs_downscale}, "
+            f"boundary_rays={cfg.boundary_rays}"
         )
         print(f"{'='*60}")
 
@@ -183,7 +191,7 @@ def bench_all_modes() -> None:
             print(f"  FPS={result.fps:,.0f}  peak={result.peak_mem_mb:.0f} MB")
         else:
             print("  OOM at max B (unexpected)")
-        results[mode] = (max_b, result)
+        results[name] = (max_b, result)
 
     # Summary table
     print(f"\n{'='*60}")
@@ -191,11 +199,11 @@ def bench_all_modes() -> None:
     print(f"{'='*60}")
     print(f"{'Mode':<14} {'Max B':>6} {'FPS@MaxB':>10} {'Peak MB':>10}")
     print("-" * 44)
-    for mode in modes:
-        max_b, r = results[mode]
+    for name, _cfg in configs:
+        max_b, r = results[name]
         fps_str = f"{r.fps:,.0f}" if r.success else "OOM"
         peak_str = f"{r.peak_mem_mb:,.0f}" if r.success else "—"
-        print(f"{mode:<14} {max_b:>6} {fps_str:>10} {peak_str:>10}")
+        print(f"{name:<14} {max_b:>6} {fps_str:>10} {peak_str:>10}")
 
 
 if __name__ == "__main__":

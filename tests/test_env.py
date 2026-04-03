@@ -21,6 +21,8 @@ def _test_cfg(**overrides) -> SofaEnvConfig:
         sofa_config=TEST_SOFA,
         max_steps=20,
         compile_rasterizer=False,
+        observation_type="grid",
+        boundary_rays=0,
     )
     defaults.update(overrides)
     return SofaEnvConfig(**defaults)  # type: ignore[arg-type]
@@ -280,7 +282,7 @@ class TestObsModes:
         assert obs.shape[3] == crop_w // 2
 
     def test_boundary_mode(self) -> None:
-        cfg = _test_cfg(boundary_rays=64)
+        cfg = _test_cfg(observation_type="boundary", boundary_rays=64)
         env = make_sofa_env(num_envs=2, cfg=cfg, device=TEST_DEVICE)
         td = env.reset()
         obs = td["observation"]
