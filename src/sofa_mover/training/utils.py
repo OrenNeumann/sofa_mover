@@ -27,12 +27,12 @@ class EpisodeMetrics:
     """Per-batch episode metrics (only present when at least one episode is done)."""
 
     n_done: int
-    mean_terminal_area: float
+    area_at_goal: float
+    goal_rate: float
     truncation_rate: float
     mean_ep_length: float
     mean_total_angle: float
     mean_total_distance: float
-    mean_area: float
     last_done_idx: int
 
 
@@ -134,30 +134,29 @@ def extract_episode_metrics(data_flat: TensorDictBase) -> EpisodeMetrics | None:
     ep_total_distance = data_flat["next", "episode_total_distance"].squeeze(-1)[
         done_mask
     ]
-    ep_area_integral = data_flat["next", "episode_area_integral"].squeeze(-1)[done_mask]
     # truncated = done AND NOT terminated
     ep_terminated = data_flat["next", "terminated"].squeeze(-1)[done_mask]
     truncated = ~ep_terminated
 
-    goal_mask = ep_terminal_area > 0
-    mean_terminal_area = (
-        ep_terminal_area[goal_mask].mean().item() if goal_mask.any() else 0.0
-    )
+    # area_at_goal: average terminal area over ALL done episodes.
+    # Truncated/area_dead episodes have terminal_area=0, so this naturally
+    # combines success rate with area quality.
+    area_at_goal = ep_terminal_area.mean().item()
+    goal_rate = (ep_terminal_area > 0).float().mean().item()
     truncation_rate = truncated.float().mean().item()
     mean_ep_length = ep_length.mean().item()
     mean_total_angle = ep_total_angle.mean().item()
     mean_total_distance = ep_total_distance.mean().item()
-    mean_area = (ep_area_integral / ep_length.clamp(min=1)).mean().item()
     last_done_idx = int(done_mask.nonzero(as_tuple=False)[-1].item())
 
     return EpisodeMetrics(
         n_done=n_done,
-        mean_terminal_area=mean_terminal_area,
+        area_at_goal=area_at_goal,
+        goal_rate=goal_rate,
         truncation_rate=truncation_rate,
         mean_ep_length=mean_ep_length,
         mean_total_angle=mean_total_angle,
         mean_total_distance=mean_total_distance,
-        mean_area=mean_area,
         last_done_idx=last_done_idx,
     )
 

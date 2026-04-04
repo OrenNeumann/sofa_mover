@@ -173,7 +173,6 @@ class SofaEnv(EnvBase):
         # Episode metric accumulators (reset per episode)
         self._episode_total_angle = torch.zeros(num_envs, 1, device=device)
         self._episode_total_distance = torch.zeros(num_envs, 1, device=device)
-        self._episode_area_integral = torch.zeros(num_envs, 1, device=device)
 
         # Boundary ray-casting setup (if enabled)
         if cfg.observation_type == "boundary":
@@ -228,7 +227,9 @@ class SofaEnv(EnvBase):
             ),
             episode_total_angle=Unbounded(**_unbounded_b1),
             episode_total_distance=Unbounded(**_unbounded_b1),
-            episode_area_integral=Unbounded(**_unbounded_b1),
+            reward_erosion=Unbounded(**_unbounded_b1),
+            reward_progress=Unbounded(**_unbounded_b1),
+            reward_terminal=Unbounded(**_unbounded_b1),
             shape=(B,),
         )
 
@@ -306,7 +307,6 @@ class SofaEnv(EnvBase):
             self._step_count[reset_mask] = 0
             self._episode_total_angle[reset_mask] = 0.0
             self._episode_total_distance[reset_mask] = 0.0
-            self._episode_area_integral[reset_mask] = 0.0
 
         # Build observation
         if self.cfg.observation_type == "boundary":
@@ -335,7 +335,9 @@ class SofaEnv(EnvBase):
                 "episode_length": torch.zeros(B, 1, dtype=torch.int64, device=device),
                 "episode_total_angle": torch.zeros(B, 1, device=device),
                 "episode_total_distance": torch.zeros(B, 1, device=device),
-                "episode_area_integral": torch.zeros(B, 1, device=device),
+                "reward_erosion": torch.zeros(B, 1, device=device),
+                "reward_progress": torch.zeros(B, 1, device=device),
+                "reward_terminal": torch.zeros(B, 1, device=device),
             },
             batch_size=(B,),
             device=device,
@@ -370,8 +372,6 @@ class SofaEnv(EnvBase):
 
         # Area after erosion
         area_after = new_sofa.flatten(1).sum(dim=1) * self.cell_area  # (B,)
-        self._episode_area_integral += area_after.unsqueeze(1)
-
         # Goal check: sofa COM close to goal point
         com = _sofa_com(new_sofa, self.x_grid, self.y_grid)  # (B, 2)
         goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, pose_next)  # (B, 2)
@@ -426,7 +426,9 @@ class SofaEnv(EnvBase):
                 "episode_length": self._step_count.clone(),
                 "episode_total_angle": self._episode_total_angle.clone(),
                 "episode_total_distance": self._episode_total_distance.clone(),
-                "episode_area_integral": self._episode_area_integral.clone(),
+                "reward_erosion": erosion_penalty.unsqueeze(1),
+                "reward_progress": progress_bonus.unsqueeze(1),
+                "reward_terminal": terminal_bonus.unsqueeze(1),
             },
             batch_size=(B,),
             device=self.device,

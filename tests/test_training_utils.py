@@ -54,7 +54,6 @@ def test_extract_episode_metrics_aggregates_done_episodes() -> None:
             "episode_length": torch.tensor([[10], [20], [30]]),
             "episode_total_angle": torch.tensor([[1.0], [3.0], [5.0]]),
             "episode_total_distance": torch.tensor([[2.0], [4.0], [6.0]]),
-            "episode_area_integral": torch.tensor([[5.0], [20.0], [12.0]]),
         },
         batch_size=(3,),
     )
@@ -64,12 +63,13 @@ def test_extract_episode_metrics_aggregates_done_episodes() -> None:
 
     assert metrics is not None
     assert metrics.n_done == 2
-    assert metrics.mean_terminal_area == pytest.approx(0.8)
+    # area_at_goal averages over ALL done episodes (0.8 + 0.0) / 2 = 0.4
+    assert metrics.area_at_goal == pytest.approx(0.4)
+    assert metrics.goal_rate == pytest.approx(0.5)
     assert metrics.truncation_rate == pytest.approx(0.5)
     assert metrics.mean_ep_length == pytest.approx(15.0)
     assert metrics.mean_total_angle == pytest.approx(2.0)
     assert metrics.mean_total_distance == pytest.approx(3.0)
-    assert metrics.mean_area == pytest.approx(0.75)
     assert metrics.last_done_idx == 1
 
 

@@ -28,14 +28,15 @@ run.define_metric("*", step_metric="env_steps")
 stack = build_training_stack(config)
 
 # --- Training loop ---
-best_mean_area = 0.0
+best_area_at_goal = 0.0
 batch_idx = 0
 total_env_steps = 0
 pbar = tqdm(
     total=config.total_frames,
     desc="Training",
     unit="step",
-    unit_scale=True,
+    unit_scale=False,
+    mininterval=0.1,
 )
 
 for data in stack.collector:
@@ -62,11 +63,15 @@ for data in stack.collector:
     elapsed = time.perf_counter() - t0
     fps = batch_frames / elapsed
 
-    mean_reward = data["next", "reward"].flatten().mean().item()
+    next_data = data["next"]
+    mean_reward = next_data["reward"].flatten().mean().item()
     log_payload: dict[str, float | int | Image] = {
         "env_steps": total_env_steps,
         "train/fps": fps,
         "train/mean_reward": mean_reward,
+        "reward/erosion": next_data["reward_erosion"].flatten().mean().item(),
+        "reward/progress": next_data["reward_progress"].flatten().mean().item(),
+        "reward/terminal": next_data["reward_terminal"].flatten().mean().item(),
         "loss/policy": optimization_stats.loss_policy,
         "loss/critic": optimization_stats.loss_critic,
         "loss/entropy": optimization_stats.loss_entropy,
@@ -77,12 +82,12 @@ for data in stack.collector:
     if episode_metrics is not None:
         log_payload.update(
             {
-                "episode/terminal_area": episode_metrics.mean_terminal_area,
+                "episode/area_at_goal": episode_metrics.area_at_goal,
+                "episode/goal_rate": episode_metrics.goal_rate,
                 "episode/truncation_rate": episode_metrics.truncation_rate,
                 "episode/episode_length": episode_metrics.mean_ep_length,
                 "episode/total_angle": episode_metrics.mean_total_angle,
                 "episode/total_distance": episode_metrics.mean_total_distance,
-                "episode/mean_area": episode_metrics.mean_area,
             }
         )
         composite = maybe_build_episode_composite(
@@ -97,23 +102,9 @@ for data in stack.collector:
 
     run.log(log_payload)
 
-    pbar.set_postfix(
-        fps=f"{fps:,.0f}",
-        reward=f"{mean_reward:+.4f}",
-        done="0" if episode_metrics is None else f"{episode_metrics.n_done:.0f}",
-        area=(
-            "0.0000"
-            if episode_metrics is None
-            else f"{episode_metrics.mean_terminal_area:.4f}"
-        ),
-    )
-
     # Save best
-    if (
-        episode_metrics is not None
-        and episode_metrics.mean_terminal_area > best_mean_area
-    ):
-        best_mean_area = episode_metrics.mean_terminal_area
+    if episode_metrics is not None and episode_metrics.area_at_goal > best_area_at_goal:
+        best_area_at_goal = episode_metrics.area_at_goal
         torch.save(
             {
                 "actor": dict(stack.actor.state_dict()),
@@ -121,7 +112,7 @@ for data in stack.collector:
                 "encoder": dict(stack.actor_net.encoder.state_dict()),
                 "config": config,
                 "batch_idx": batch_idx,
-                "best_mean_area": best_mean_area,
+                "best_area_at_goal": best_area_at_goal,
             },
             output_path / "best_policy.pt",
         )
@@ -140,11 +131,11 @@ torch.save(
         "encoder": dict(stack.actor_net.encoder.state_dict()),
         "config": config,
         "batch_idx": batch_idx,
-        "best_mean_area": best_mean_area,
+        "best_area_at_goal": best_area_at_goal,
     },
     final_path,
 )
-print(f"Training complete. Best mean terminal area: {best_mean_area:.4f}")
+print(f"Training complete. Best area at goal: {best_area_at_goal:.4f}")
 print(f"Saved to {final_path}")
 
 # Visualize the best policy (fall back to final if no best was saved)

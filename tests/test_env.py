@@ -176,7 +176,6 @@ class TestEpisodeAccumulators:
         for key in [
             "episode_total_angle",
             "episode_total_distance",
-            "episode_area_integral",
             "episode_length",
             "terminal_area",
         ]:
@@ -189,7 +188,6 @@ class TestEpisodeAccumulators:
         td_next = env.step(td)["next"]
         assert (td_next["episode_total_angle"] == 0).all()
         assert (td_next["episode_total_distance"] == 0).all()
-        assert (td_next["episode_area_integral"] > 0).all()
 
     def test_accumulators_increase_over_steps(self) -> None:
         cfg = _test_cfg()
@@ -229,20 +227,6 @@ class TestEpisodeAccumulators:
         td2_next = env.step(td2)["next"]
         assert td2_next["episode_total_angle"][0].item() == 0.0
         assert td2_next["episode_total_distance"][0].item() == 0.0
-
-    def test_area_integral_correctness(self) -> None:
-        """After N noop steps, area_integral = N * constant_area."""
-        cfg = _test_cfg()
-        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
-        td = env.reset()
-        n_steps = 5
-        for _ in range(n_steps):
-            td["action"] = _noop_action(1)
-            td = env.step(td)["next"]
-        # Noop preserves area, so current area = initial area after erosion
-        current_area = env._sofa.sum().item() * env.cell_area
-        integral = td["episode_area_integral"][0].item()
-        assert integral == pytest.approx(n_steps * current_area, rel=1e-4)
 
     def test_terminal_area_zero_on_truncation(self) -> None:
         """terminal_area should be 0 when episode ends by truncation."""
