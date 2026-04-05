@@ -31,6 +31,7 @@ class TrainingStack:
     critic: ValueOperator
     loss_module: ClipPPOLoss
     optimizer: torch.optim.Optimizer
+    lr_scheduler: torch.optim.lr_scheduler.LinearLR
     collector: Collector
 
 
@@ -106,8 +107,15 @@ def build_training_stack(
         value_network=critic,
     )
 
-    # --- Optimizer ---
+    # --- Optimizer + LR schedule ---
     optimizer = torch.optim.Adam(loss_module.parameters(), lr=config.lr)
+    total_batches = config.total_frames // (num_envs * config.rollout_length)
+    lr_scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=1.0,
+        end_factor=config.lr_end_factor,
+        total_iters=total_batches,
+    )
 
     # --- Collector ---
     collector = Collector(
@@ -126,5 +134,6 @@ def build_training_stack(
         critic=critic,
         loss_module=loss_module,
         optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
         collector=collector,
     )

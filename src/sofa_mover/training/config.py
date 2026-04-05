@@ -66,6 +66,7 @@ class TrainingConfig:
     num_epochs: int = 4
     minibatch_size: int = 512
     lr: float = 3e-4
+    lr_end_factor: float = 0.0
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2

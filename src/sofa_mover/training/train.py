@@ -65,6 +65,7 @@ for data in stack.collector:
         config.device,
     )
     normalizer.freeze = False
+    stack.lr_scheduler.step()
 
     # --- Logging ---
     batch_frames = data.numel()
@@ -87,6 +88,7 @@ for data in stack.collector:
         "loss/critic": optimization_stats.loss_critic,
         "loss/entropy": optimization_stats.loss_entropy,
         "train/grad_norm": optimization_stats.grad_norm,
+        "train/lr": stack.lr_scheduler.get_last_lr()[0],
     }
 
     episode_metrics = extract_episode_metrics(data_flat)
