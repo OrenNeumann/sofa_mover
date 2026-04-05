@@ -2,16 +2,16 @@ import math
 
 import torch
 
-from sofa_mover.corridor import DEVICE, GridConfig
 from sofa_mover.rasterize import Rasterizer
+from sofa_mover.training.config import GridConfig
 
 
 def _make_pose(
     x: float,
     y: float,
     theta: float,
+    device: torch.device,
     batch_size: int = 1,
-    device: torch.device = DEVICE,
 ) -> torch.Tensor:
     """Helper to create a (B, 3) pose tensor."""
     return (

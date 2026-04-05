@@ -10,6 +10,7 @@ from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 
 from sofa_mover.env import SofaEnv, make_sofa_env
+from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.networks import (
     SofaActorNet,
     SofaBoundaryEncoder,
@@ -24,6 +25,7 @@ class TrainingStack:
     """Runtime objects used by the training loop."""
 
     env: SofaEnv
+    normalizer: Normalizer
     actor_net: SofaActorNet
     actor: ProbabilisticActor
     critic: ValueOperator
@@ -46,11 +48,15 @@ def build_training_stack(
         cfg=env_cfg,
         device=device,
     )
+    normalizer = Normalizer.from_config(config, num_envs)
 
     # --- Networks (encoder selected from cfg) ---
     encoder: SofaEncoder | SofaBoundaryEncoder
     if env_cfg.observation_type == "boundary":
-        encoder = SofaBoundaryEncoder(n_rays=env_cfg.boundary_rays)
+        encoder = SofaBoundaryEncoder(
+            n_rays=env_cfg.boundary_rays,
+            normalizer=normalizer,
+        )
     else:  # "grid"
         encoder = SofaEncoder()
     actor_net = SofaActorNet(encoder=encoder).to(device)
@@ -59,7 +65,11 @@ def build_training_stack(
     # Wrap actor for TorchRL
     actor_module = TensorDictModule(
         actor_net,
-        in_keys=["observation", "pose", "progress"],
+        in_keys=[
+            ("observation", "sofa_view"),
+            ("observation", "pose"),
+            ("observation", "progress"),
+        ],
         out_keys=["logits"],
     )
     actor = ProbabilisticActor(
@@ -73,7 +83,11 @@ def build_training_stack(
     # Wrap critic for TorchRL
     critic = ValueOperator(
         module=critic_net,
-        in_keys=["observation", "pose", "progress"],
+        in_keys=[
+            ("observation", "sofa_view"),
+            ("observation", "pose"),
+            ("observation", "progress"),
+        ],
     )
 
     # --- PPO Loss ---
@@ -106,6 +120,7 @@ def build_training_stack(
 
     return TrainingStack(
         env=env,
+        normalizer=normalizer,
         actor_net=actor_net,
         actor=actor,
         critic=critic,

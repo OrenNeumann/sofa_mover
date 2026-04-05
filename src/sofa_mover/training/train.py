@@ -10,11 +10,13 @@ from wandb.sdk.data_types.image import Image
 
 from sofa_mover.evaluate import evaluate
 from sofa_mover.training.config import TrainingConfig
+from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.training.stack import build_training_stack
 from sofa_mover.training.utils import (
     compute_gae_minibatch,
     extract_episode_metrics,
     maybe_build_episode_composite,
+    normalize_rewards_inplace,
     optimize_ppo_epochs,
 )
 
@@ -26,6 +28,7 @@ run = wandb_init(project=config.wandb_project)
 run.define_metric("env_steps")
 run.define_metric("*", step_metric="env_steps")
 stack = build_training_stack(config)
+normalizer: Normalizer = stack.normalizer
 
 # --- Training loop ---
 best_area_at_goal = 0.0
@@ -41,6 +44,11 @@ pbar = tqdm(
 
 for data in stack.collector:
     t0 = time.perf_counter()
+    next_data = data["next"]
+    raw_reward_mean = next_data["reward"].flatten().mean().item()
+    normalized_reward = normalize_rewards_inplace(data, normalizer)
+
+    normalizer.freeze = True
     # Compute GAE advantages in minibatches (avoids converting the full
     # obs buffer to float32 at once, which OOMs for large B)
     compute_gae_minibatch(data, stack.loss_module, config.minibatch_size)
@@ -56,6 +64,7 @@ for data in stack.collector:
         config.max_grad_norm,
         config.device,
     )
+    normalizer.freeze = False
 
     # --- Logging ---
     batch_frames = data.numel()
@@ -63,15 +72,17 @@ for data in stack.collector:
     elapsed = time.perf_counter() - t0
     fps = batch_frames / elapsed
 
-    next_data = data["next"]
-    mean_reward = next_data["reward"].flatten().mean().item()
+    raw_erosion = next_data["reward_erosion"].flatten().mean().item()
+    raw_progress = next_data["reward_progress"].flatten().mean().item()
+    raw_terminal = next_data["reward_terminal"].flatten().mean().item()
     log_payload: dict[str, float | int | Image] = {
         "env_steps": total_env_steps,
         "train/fps": fps,
-        "train/mean_reward": mean_reward,
-        "reward/erosion": next_data["reward_erosion"].flatten().mean().item(),
-        "reward/progress": next_data["reward_progress"].flatten().mean().item(),
-        "reward/terminal": next_data["reward_terminal"].flatten().mean().item(),
+        "train/mean_reward_normalized": normalized_reward.flatten().mean().item(),
+        "train/mean_reward_raw": raw_reward_mean,
+        "reward/erosion": raw_erosion,
+        "reward/progress": raw_progress,
+        "reward/terminal": raw_terminal,
         "loss/policy": optimization_stats.loss_policy,
         "loss/critic": optimization_stats.loss_critic,
         "loss/entropy": optimization_stats.loss_entropy,
@@ -110,6 +121,7 @@ for data in stack.collector:
                 "actor": dict(stack.actor.state_dict()),
                 "critic": dict(stack.critic.state_dict()),
                 "encoder": dict(stack.actor_net.encoder.state_dict()),
+                "vec_normalize": normalizer.state_dict(),
                 "config": config,
                 "batch_idx": batch_idx,
                 "best_area_at_goal": best_area_at_goal,
@@ -121,6 +133,7 @@ for data in stack.collector:
     batch_idx += 1
 
 run.finish()
+stack.collector.shutdown()
 
 # Save final
 final_path = output_path / "final_policy.pt"
@@ -129,6 +142,7 @@ torch.save(
         "actor": dict(stack.actor.state_dict()),
         "critic": dict(stack.critic.state_dict()),
         "encoder": dict(stack.actor_net.encoder.state_dict()),
+        "vec_normalize": normalizer.state_dict(),
         "config": config,
         "batch_idx": batch_idx,
         "best_area_at_goal": best_area_at_goal,

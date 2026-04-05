@@ -5,8 +5,8 @@ import math
 import torch
 import pytest
 
-from sofa_mover.corridor import GridConfig
-from sofa_mover.env import SofaEnvConfig, make_sofa_env
+from sofa_mover.env import make_sofa_env
+from sofa_mover.training.config import GridConfig, SofaEnvConfig
 
 
 # Use small grids + CPU for fast tests
@@ -16,8 +16,8 @@ NUM_ENVS = 2
 H = TEST_SOFA.grid_size
 
 
-def _test_cfg(**overrides) -> SofaEnvConfig:
-    defaults = dict(
+def _test_cfg(**overrides: object) -> SofaEnvConfig:
+    defaults: dict[str, object] = dict(
         sofa_config=TEST_SOFA,
         max_steps=20,
         compile_rasterizer=False,
@@ -51,13 +51,14 @@ def _random_action(B: int) -> torch.Tensor:
 class TestReset:
     def test_shapes(self, env) -> None:
         td = env.reset()
-        obs = td["observation"]
+        assert set(td["observation"].keys()) == {"sofa_view", "pose", "progress"}
+        obs = td["observation", "sofa_view"]
         # 1-channel sofa, cropped to bounding box
         assert obs.shape[0] == NUM_ENVS
         assert obs.shape[1] == 1  # single channel (sofa only)
         assert obs.dtype == torch.uint8
-        assert td["pose"].shape == (NUM_ENVS, 3)
-        assert td["progress"].shape == (NUM_ENVS, 1)
+        assert td["observation", "pose"].shape == (NUM_ENVS, 3)
+        assert td["observation", "progress"].shape == (NUM_ENVS, 1)
         assert td["done"].shape == (NUM_ENVS, 1)
 
     def test_sofa_is_carved(self, env) -> None:
@@ -71,7 +72,9 @@ class TestReset:
     def test_initial_progress_zero(self, env) -> None:
         td = env.reset()
         assert torch.allclose(
-            td["progress"], torch.zeros_like(td["progress"]), atol=1e-5
+            td["observation", "progress"],
+            torch.zeros_like(td["observation", "progress"]),
+            atol=1e-5,
         )
 
     def test_initial_pose(self, env) -> None:
@@ -81,7 +84,7 @@ class TestReset:
 
     def test_observation_single_channel_binary(self, env) -> None:
         td = env.reset()
-        obs = td["observation"].float()
+        obs = td["observation", "sofa_view"].float()
         assert obs.min() >= 0.0 and obs.max() <= 1.0
 
 
@@ -90,10 +93,10 @@ class TestStep:
         td = env.reset()
         td["action"] = _noop_action(NUM_ENVS)
         td_next = env.step(td)["next"]
-        obs = td_next["observation"]
+        obs = td_next["observation", "sofa_view"]
         assert obs.shape[0] == NUM_ENVS
         assert obs.shape[1] == 1  # single channel
-        assert td_next["pose"].shape == (NUM_ENVS, 3)
+        assert td_next["observation", "pose"].shape == (NUM_ENVS, 3)
         assert td_next["reward"].shape == (NUM_ENVS, 1)
         assert td_next["done"].shape == (NUM_ENVS, 1)
         assert td_next["terminated"].shape == (NUM_ENVS, 1)
@@ -158,14 +161,14 @@ class TestGoalDetection:
         cfg = _test_cfg(delta_xy=0.3, delta_theta=math.pi / 8)
         env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
         td = env.reset()
-        initial_progress = td["progress"][0].item()
+        initial_progress = td["observation", "progress"][0].item()
         # Move: translate down + rotate (navigating the bend)
         for _ in range(5):
             action = torch.zeros(1, 27, device=TEST_DEVICE)
             action[0, 1 * 9 + 0 * 3 + 2] = 1.0  # dx=0, dy=-, dt=+
             td["action"] = action
             td = env.step(td)["next"]
-        assert td["progress"][0].item() > initial_progress
+        assert td["observation", "progress"][0].item() > initial_progress
 
 
 class TestEpisodeAccumulators:
@@ -257,7 +260,7 @@ class TestObsModes:
         cfg = _test_cfg(obs_downscale=2)
         env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
         td = env.reset()
-        obs = td["observation"]
+        obs = td["observation", "sofa_view"]
         assert obs.shape[1] == 1
         # Downscaled: each dim halved from crop
         crop_h = env._crop_y.stop - env._crop_y.start
@@ -269,7 +272,7 @@ class TestObsModes:
         cfg = _test_cfg(observation_type="boundary", boundary_rays=64)
         env = make_sofa_env(num_envs=2, cfg=cfg, device=TEST_DEVICE)
         td = env.reset()
-        obs = td["observation"]
+        obs = td["observation", "sofa_view"]
         assert obs.shape == (2, 64)
         assert obs.dtype == torch.float32
         assert obs.min() >= 0.0
@@ -277,7 +280,7 @@ class TestObsModes:
         # After stepping, boundary should still be valid
         td["action"] = _noop_action(2)
         td_next = env.step(td)["next"]
-        assert td_next["observation"].shape == (2, 64)
+        assert td_next["observation", "sofa_view"].shape == (2, 64)
 
 
 class TestRollout:

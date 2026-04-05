@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from sofa_mover.corridor import DEVICE, GridConfig
+from sofa_mover.training.config import GridConfig
 from sofa_mover.visualization.render import (
     FrameData,
     build_composite,
@@ -14,10 +14,12 @@ from sofa_mover.visualization.render import (
 
 
 class TestComputeFrameData:
-    def test_converts_tensors_and_computes_area(self, sofa_config: GridConfig) -> None:
+    def test_converts_tensors_and_computes_area(
+        self, sofa_config: GridConfig, device: torch.device
+    ) -> None:
         H = sofa_config.grid_size
-        sofa = torch.ones(1, 1, H, H, device=DEVICE)
-        mask = torch.ones(1, 1, H, H, device=DEVICE)
+        sofa = torch.ones(1, 1, H, H, device=device)
+        mask = torch.ones(1, 1, H, H, device=device)
 
         fd = compute_frame_data(0, (0.0, 0.0, 0.0), sofa, mask, sofa_config)
 
@@ -30,11 +32,13 @@ class TestComputeFrameData:
         expected_area = sofa_config.world_size**2
         assert fd.area == pytest.approx(expected_area, rel=1e-2)
 
-    def test_partial_sofa_area(self, sofa_config: GridConfig) -> None:
+    def test_partial_sofa_area(
+        self, sofa_config: GridConfig, device: torch.device
+    ) -> None:
         H = sofa_config.grid_size
-        sofa = torch.zeros(1, 1, H, H, device=DEVICE)
+        sofa = torch.zeros(1, 1, H, H, device=device)
         sofa[:, :, : H // 2, :] = 1.0  # half the pixels
-        mask = torch.ones(1, 1, H, H, device=DEVICE)
+        mask = torch.ones(1, 1, H, H, device=device)
 
         fd = compute_frame_data(5, (1.0, 2.0, 0.5), sofa, mask, sofa_config)
 

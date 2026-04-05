@@ -2,7 +2,8 @@ import torch
 from jaxtyping import Float
 from torch import Tensor
 
-from sofa_mover.corridor import SOFA_CONFIG, CorridorGeometry, GridConfig, Pose
+from sofa_mover.corridor import CorridorGeometry, Pose
+from sofa_mover.training.config import SOFA_CONFIG, GridConfig
 
 
 def _analytical_corridor_mask(

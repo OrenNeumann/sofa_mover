@@ -1,13 +1,12 @@
 import torch
 
 from sofa_mover.corridor import (
-    DEVICE,
     CorridorGeometry,
-    GridConfig,
     Rectangle,
     make_l_corridor,
 )
 from sofa_mover.rasterize import Rasterizer
+from sofa_mover.training.config import GridConfig
 
 
 def test_make_l_corridor_returns_geometry() -> None:
@@ -46,21 +45,21 @@ def test_make_l_corridor_custom_width() -> None:
     assert vert.x_max == 1.0
 
 
-def test_geometry_to_tensor() -> None:
+def test_geometry_to_tensor(device: torch.device) -> None:
     geometry = make_l_corridor()
-    t = geometry.to_tensor(DEVICE)
+    t = geometry.to_tensor(device)
     assert t.shape == (2, 4)
-    assert t.device.type == DEVICE.type
+    assert t.device.type == device.type
 
 
-def test_corridor_mask_area() -> None:
+def test_corridor_mask_area(device: torch.device) -> None:
     """Corridor mask at identity pose on a large grid should have correct area."""
     corridor_width = 1.0
     geometry = make_l_corridor(corridor_width=corridor_width)
     config = GridConfig(grid_size=256, world_size=6.0)
-    rasterizer = Rasterizer(geometry, config, device=DEVICE, compile=False)
+    rasterizer = Rasterizer(geometry, config, device=device, compile=False)
 
-    mask = rasterizer.corridor_mask(torch.tensor([[0.0, 0.0, 0.0]], device=DEVICE))
+    mask = rasterizer.corridor_mask(torch.tensor([[0.0, 0.0, 0.0]], device=device))
     assert mask.shape == (1, 1, 256, 256)
 
     # Binary values only
@@ -84,13 +83,13 @@ def test_corridor_mask_area() -> None:
     assert abs(actual_pixels - expected_pixels) / expected_pixels < 0.03
 
 
-def test_corridor_corner_is_passable() -> None:
+def test_corridor_corner_is_passable(device: torch.device) -> None:
     """The corner region (around origin) should be passable."""
     geometry = make_l_corridor()
     config = GridConfig(grid_size=256, world_size=6.0)
-    rasterizer = Rasterizer(geometry, config, device=DEVICE, compile=False)
+    rasterizer = Rasterizer(geometry, config, device=device, compile=False)
 
-    mask = rasterizer.corridor_mask(torch.tensor([[0.0, 0.0, 0.0]], device=DEVICE))
+    mask = rasterizer.corridor_mask(torch.tensor([[0.0, 0.0, 0.0]], device=device))
 
     # World coords (-0.3, -0.3) should be inside the vertical leg
     ppu = config.pixels_per_unit

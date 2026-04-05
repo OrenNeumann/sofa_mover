@@ -1,9 +1,5 @@
 """TorchRL environment for the sofa moving problem."""
 
-import math
-from dataclasses import dataclass
-from typing import Literal
-
 import torch
 import torch.nn.functional as F
 from jaxtyping import Float
@@ -13,46 +9,10 @@ from torch import Tensor
 from torchrl.data.tensor_specs import Bounded, Composite, OneHot, Unbounded
 from torchrl.envs import EnvBase
 
-from sofa_mover.corridor import (
-    DEVICE,
-    SOFA_CONFIG,
-    GridConfig,
-    Pose,
-    make_l_corridor,
-)
+from sofa_mover.corridor import Pose, make_l_corridor
 from sofa_mover.erosion import erode
 from sofa_mover.rasterize import Rasterizer
-
-ObservationType = Literal["grid", "boundary"]
-
-
-@dataclass(frozen=True)
-class SofaEnvConfig:
-    """Hyperparameters for the SofaEnv."""
-
-    sofa_config: GridConfig = SOFA_CONFIG
-    compile_rasterizer: bool = True
-    corridor_width: float = 1.0
-    delta_xy: float = 0.05
-    delta_theta: float = math.pi / 60
-    max_steps: int = 300
-    num_substeps: int = 4
-    lambda_erosion: float = 0.1
-    lambda_progress: float = 1.0
-    min_area_fraction: float = 0.05
-    initial_pose: tuple[float, float, float] = (0.0, 2.0, 0.0)
-    # Max y in corridor coords for the initial sofa region.
-    start_y_max: float = -1.5
-    # Goal point in corridor-centric coords (middle of exit end)
-    goal_point: tuple[float, float] = (2.0, 0.0)
-    goal_radius: float = 0.3
-    observation_type: ObservationType = "boundary"
-    # Grid observation downscale factor (1 = full res, 2 = half, 4 = quarter)
-    # Only used for "grid" obs.
-    obs_downscale: int = 1
-    # Boundary observation: number of rays sampled from the sofa contour.
-    # Only used for "boundary" obs.
-    boundary_rays: int = 128
+from sofa_mover.training.config import DEVICE, SofaEnvConfig
 
 
 def _goal_corridor_to_sofa(
@@ -217,10 +177,14 @@ class SofaEnv(EnvBase):
                 dtype=torch.uint8,
                 device=self.device,
             )
-        self.observation_spec = Composite(
-            observation=obs_spec,
+        observation_bundle_spec = Composite(
+            sofa_view=obs_spec,
             pose=Unbounded(shape=(B, 3), dtype=torch.float32, device=self.device),
             progress=Unbounded(**_unbounded_b1),
+            shape=(B,),
+        )
+        self.observation_spec = Composite(
+            observation=observation_bundle_spec,
             terminal_area=Unbounded(**_unbounded_b1),
             episode_length=Unbounded(
                 shape=(B, 1), dtype=torch.int64, device=self.device
@@ -308,11 +272,10 @@ class SofaEnv(EnvBase):
             self._episode_total_angle[reset_mask] = 0.0
             self._episode_total_distance[reset_mask] = 0.0
 
-        # Build observation
         if self.cfg.observation_type == "boundary":
-            observation = self._boundary(self._sofa)
+            sofa_view = self._boundary(self._sofa)
         else:  # "grid"
-            observation = self._downscale_obs(self._sofa.to(torch.uint8))
+            sofa_view = self._downscale_obs(self._sofa.to(torch.uint8))
 
         # Progress = 1 - (dist_to_goal / initial_dist)
         com = _sofa_com(self._sofa, self.x_grid, self.y_grid)
@@ -322,12 +285,13 @@ class SofaEnv(EnvBase):
             self.initial_goal_dist, 1e-8
         )
 
-        # TODO: observation should also include sofa pose
         return TensorDict(
             {
-                "observation": observation,
-                "pose": self._pose.clone(),
-                "progress": progress,
+                "observation": {
+                    "sofa_view": sofa_view,
+                    "pose": self._pose.clone(),
+                    "progress": progress,
+                },
                 "done": torch.zeros(B, 1, dtype=torch.bool, device=device),
                 "terminated": torch.zeros(B, 1, dtype=torch.bool, device=device),
                 "truncated": torch.zeros(B, 1, dtype=torch.bool, device=device),
@@ -404,20 +368,21 @@ class SofaEnv(EnvBase):
         self._pose = pose_next
         self._goal_dist = goal_dist
 
-        # Observation
         if self.cfg.observation_type == "boundary":
-            observation = self._boundary(new_sofa)
+            sofa_view = self._boundary(new_sofa)
         else:  # "grid"
-            observation = self._downscale_obs(new_sofa.to(torch.uint8))
+            sofa_view = self._downscale_obs(new_sofa.to(torch.uint8))
 
         # Progress = 1 - (dist_to_goal / initial_dist)
         progress = 1.0 - goal_dist.unsqueeze(1) / max(self.initial_goal_dist, 1e-8)
 
         return TensorDict(
             {
-                "observation": observation,
-                "pose": self._pose.clone(),
-                "progress": progress,
+                "observation": {
+                    "sofa_view": sofa_view,
+                    "pose": self._pose.clone(),
+                    "progress": progress,
+                },
                 "reward": reward,
                 "done": done.unsqueeze(1),
                 "terminated": terminated.unsqueeze(1),

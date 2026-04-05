@@ -8,6 +8,7 @@ from tensordict import TensorDictBase
 from torchrl.objectives import ClipPPOLoss
 
 from sofa_mover.env import SofaEnv
+from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.visualization.render import build_composite
 
 
@@ -65,6 +66,19 @@ def compute_gae_minibatch(
             value_targets.append(chunk[vt_key])
     data.set(adv_key, torch.cat(advantages, dim=0))
     data.set(vt_key, torch.cat(value_targets, dim=0))
+
+
+# TODO: hacky, clean up
+def normalize_rewards_inplace(
+    data: TensorDictBase, normalizer: Normalizer
+) -> torch.Tensor:
+    """Normalize rollout rewards in-place and return the normalized tensor."""
+    normalized_reward = normalizer.normalize_rewards(
+        data["next", "reward"],
+        data["next", "done"],
+    )
+    data["next"].set("reward", normalized_reward)
+    return normalized_reward
 
 
 def optimize_ppo_epochs(
@@ -173,9 +187,16 @@ def maybe_build_episode_composite(
     if batch_idx % image_log_interval != 0 or env.cfg.observation_type == "boundary":
         return None
 
-    sofa_img = data_flat["next", "observation"][last_done_idx, 0].float().cpu().numpy()
+    sofa_img = (
+        data_flat["next", "observation", "sofa_view"][last_done_idx, 0]
+        .float()
+        .clamp(0, 1)
+        .cpu()
+        .numpy()
+    )
+
     # Reconstruct corridor mask from pose for visualization
-    pose_td = data_flat["next", "pose"][last_done_idx].unsqueeze(0)
+    pose_td = data_flat["next", "observation", "pose"][last_done_idx].unsqueeze(0)
     corridor_full = env.rasterizer.corridor_mask(pose_td)
     mask_img = (
         env._downscale_obs(env._crop(corridor_full).to(torch.uint8))[0, 0]

@@ -4,10 +4,10 @@ from pathlib import Path
 
 import torch
 
-from sofa_mover.corridor import DEVICE
-from sofa_mover.env import SofaEnvConfig, make_sofa_env
+from sofa_mover.env import make_sofa_env
 from sofa_mover.networks import SofaActorNet, SofaBoundaryEncoder, SofaEncoder
-from sofa_mover.training.config import TrainingConfig
+from sofa_mover.training.config import DEVICE, SofaEnvConfig, TrainingConfig
+from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.visualization.render import (
     FrameData,
     compute_frame_data,
@@ -20,25 +20,40 @@ from torchrl.modules import OneHotCategorical, ProbabilisticActor
 def evaluate(
     checkpoint_path: str = "output/best_policy.pt",
     output_path: str = "output/agent_trajectory.gif",
-    device: torch.device = DEVICE,
+    device: torch.device | None = None,
 ) -> Path:
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=DEVICE if device is None else device,
+        weights_only=False,
+    )
     training_config: TrainingConfig = checkpoint["config"]
     cfg: SofaEnvConfig = training_config.env
+    device = training_config.device if device is None else device
 
-    # Single-env for visualization
     env = make_sofa_env(num_envs=1, cfg=cfg, device=device)
+    normalizer = Normalizer.from_config(training_config, num_envs=1)
+    normalizer.freeze = True
+    if "vec_normalize" in checkpoint:
+        normalizer.load_state_dict(checkpoint["vec_normalize"])
 
     # Rebuild actor with the correct encoder for this checkpoint's config
     encoder: SofaEncoder | SofaBoundaryEncoder
     if cfg.observation_type == "boundary":
-        encoder = SofaBoundaryEncoder(n_rays=cfg.boundary_rays)
+        encoder = SofaBoundaryEncoder(
+            n_rays=cfg.boundary_rays,
+            normalizer=normalizer,
+        )
     else:
         encoder = SofaEncoder()
     actor_net = SofaActorNet(encoder=encoder).to(device)
     actor_module = TensorDictModule(
         actor_net,
-        in_keys=["observation", "pose", "progress"],
+        in_keys=[
+            ("observation", "sofa_view"),
+            ("observation", "pose"),
+            ("observation", "progress"),
+        ],
         out_keys=["logits"],
     )
     actor = ProbabilisticActor(

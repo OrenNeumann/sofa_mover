@@ -1,7 +1,8 @@
 import pytest
 import torch
-from sofa_mover.corridor import DEVICE, GridConfig, make_l_corridor
+from sofa_mover.corridor import make_l_corridor
 from sofa_mover.rasterize import Rasterizer
+from sofa_mover.training.config import GridConfig
 
 
 @pytest.fixture
@@ -16,10 +17,10 @@ def template_config() -> GridConfig:
 
 @pytest.fixture
 def device() -> torch.device:
-    return DEVICE
+    return torch.device("cpu")
 
 
 @pytest.fixture
-def rasterizer(sofa_config: GridConfig) -> Rasterizer:
+def rasterizer(sofa_config: GridConfig, device: torch.device) -> Rasterizer:
     geometry = make_l_corridor()
-    return Rasterizer(geometry, sofa_config, device=DEVICE, compile=False)
+    return Rasterizer(geometry, sofa_config, device=device, compile=False)

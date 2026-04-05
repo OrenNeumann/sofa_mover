@@ -2,15 +2,15 @@ import math
 
 import torch
 
-from sofa_mover.corridor import DEVICE, GridConfig
 from sofa_mover.erosion import erode
 from sofa_mover.rasterize import Rasterizer
+from sofa_mover.training.config import GridConfig
 
 
 def _make_sofa(
     config: GridConfig,
+    device: torch.device,
     batch_size: int = 1,
-    device: torch.device = DEVICE,
 ) -> torch.Tensor:
     """Create a full (all-ones) sofa grid."""
     return torch.ones(batch_size, 1, config.grid_size, config.grid_size, device=device)
@@ -45,9 +45,11 @@ def test_partial_erosion(rasterizer: Rasterizer, sofa_config: GridConfig) -> Non
     assert area_after > 0
 
 
-def test_full_erosion_with_empty_mask(sofa_config: GridConfig) -> None:
+def test_full_erosion_with_empty_mask(
+    sofa_config: GridConfig, device: torch.device
+) -> None:
     """All-zero mask erodes the sofa completely."""
-    sofa = _make_sofa(sofa_config)
+    sofa = _make_sofa(sofa_config, device=device)
     mask = torch.zeros_like(sofa)
     result = erode(sofa, mask)
     assert result.sum().item() == 0.0

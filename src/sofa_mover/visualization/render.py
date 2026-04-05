@@ -7,6 +7,10 @@ from tqdm.rich import tqdm
 
 warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -18,7 +22,7 @@ from jaxtyping import Float
 from numpy.typing import NDArray
 from torch import Tensor
 
-from sofa_mover.corridor import GridConfig
+from sofa_mover.training.config import GridConfig
 
 
 @dataclass(frozen=True)

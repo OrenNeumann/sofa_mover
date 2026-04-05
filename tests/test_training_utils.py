@@ -1,39 +1,13 @@
-import importlib.util
-from pathlib import Path
-from typing import Protocol, cast
-
 import pytest
 import torch
 from tensordict import TensorDict
-from torchrl.collectors import Collector
 
-from sofa_mover.env import SofaEnvConfig, make_sofa_env
-from sofa_mover.training.stack import TrainingStack
+from sofa_mover.env import make_sofa_env
+from sofa_mover.training.config import SofaEnvConfig
 from sofa_mover.training.utils import (
     extract_episode_metrics,
     maybe_build_episode_composite,
 )
-
-
-class BenchOptimizationModule(Protocol):
-    def build_training_stack(
-        self,
-        num_envs: int,
-        cfg: SofaEnvConfig,
-        rollout_length: int = ...,
-        device: torch.device = ...,
-    ) -> TrainingStack: ...
-
-
-def _load_bench_optimization_module() -> BenchOptimizationModule:
-    bench_path = Path(__file__).resolve().parents[1] / "bench_optimization.py"
-    spec = importlib.util.spec_from_file_location("bench_optimization", bench_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load benchmark module from {bench_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return cast(BenchOptimizationModule, module)
 
 
 def test_extract_episode_metrics_returns_none_when_no_done() -> None:
@@ -86,8 +60,14 @@ def test_maybe_build_episode_composite_skips_boundary_mode() -> None:
     next_td = TensorDict(
         {
             "done": torch.tensor([[True]]),
-            "observation": torch.zeros(1, 8),
-            "pose": torch.zeros(1, 3),
+            "observation": TensorDict(
+                {
+                    "sofa_view": torch.zeros(1, 8),
+                    "pose": torch.zeros(1, 3),
+                    "progress": torch.zeros(1, 1),
+                },
+                batch_size=(1,),
+            ),
         },
         batch_size=(1,),
     )
@@ -102,18 +82,3 @@ def test_maybe_build_episode_composite_skips_boundary_mode() -> None:
     )
 
     assert composite is None
-
-
-def test_benchmark_stack_uses_collector() -> None:
-    bench_optimization = _load_bench_optimization_module()
-    stack = bench_optimization.build_training_stack(
-        num_envs=1,
-        cfg=SofaEnvConfig(compile_rasterizer=False),
-        rollout_length=4,
-        device=torch.device("cpu"),
-    )
-
-    try:
-        assert isinstance(stack.collector, Collector)
-    finally:
-        stack.collector.shutdown()

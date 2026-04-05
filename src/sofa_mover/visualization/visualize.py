@@ -3,26 +3,29 @@
 import math
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import torch
 import matplotlib.pyplot as plt
 
-from sofa_mover.corridor import (
-    DEVICE,
-    GridConfig,
-    make_l_corridor,
-    SOFA_CONFIG,
-)
+from sofa_mover.corridor import make_l_corridor
 from sofa_mover.rasterize import Rasterizer
 from sofa_mover.erosion import erode
+from sofa_mover.training.config import DEVICE, GridConfig, SOFA_CONFIG
 
 
-def main() -> None:
+def main(
+    device: torch.device = DEVICE,
+    sofa_config: GridConfig = SOFA_CONFIG,
+) -> None:
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
 
     geometry = make_l_corridor()
-    rasterizer = Rasterizer(geometry, SOFA_CONFIG, device=DEVICE, compile=False)
-    sofa = torch.ones(1, 1, SOFA_CONFIG.grid_size, SOFA_CONFIG.grid_size, device=DEVICE)
+    rasterizer = Rasterizer(geometry, sofa_config, device=device, compile=False)
+    sofa = torch.ones(1, 1, sofa_config.grid_size, sofa_config.grid_size, device=device)
 
     # --- Figure 1: Corridor masks at various poses ---
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -32,11 +35,11 @@ def main() -> None:
     large_rasterizer = Rasterizer(
         geometry,
         overview_config,
-        device=DEVICE,
+        device=device,
         compile=False,
     )
     template_view = large_rasterizer.corridor_mask(
-        torch.tensor([[0.0, 0.0, 0.0]], device=DEVICE)
+        torch.tensor([[0.0, 0.0, 0.0]], device=device)
     )
     axes[0].imshow(
         template_view[0, 0].cpu().numpy(),
@@ -56,16 +59,16 @@ def main() -> None:
 
     # --- Panel 2: Mask at identity pose (sofa view) ---
     mask_identity = rasterizer.corridor_mask(
-        torch.tensor([[0.0, 0.0, 0.0]], device=DEVICE)
+        torch.tensor([[0.0, 0.0, 0.0]], device=device)
     )
     axes[1].imshow(
         mask_identity[0, 0].cpu().numpy(),
         origin="lower",
         extent=[
-            -SOFA_CONFIG.world_size / 2,
-            SOFA_CONFIG.world_size / 2,
-            -SOFA_CONFIG.world_size / 2,
-            SOFA_CONFIG.world_size / 2,
+            -sofa_config.world_size / 2,
+            sofa_config.world_size / 2,
+            -sofa_config.world_size / 2,
+            sofa_config.world_size / 2,
         ],
         cmap="Greys_r",
     )
@@ -76,16 +79,16 @@ def main() -> None:
 
     # --- Panel 3: Mask at rotated pose ---
     mask_rotated = rasterizer.corridor_mask(
-        torch.tensor([[0.0, 0.0, math.pi / 4]], device=DEVICE)
+        torch.tensor([[0.0, 0.0, math.pi / 4]], device=device)
     )
     axes[2].imshow(
         mask_rotated[0, 0].cpu().numpy(),
         origin="lower",
         extent=[
-            -SOFA_CONFIG.world_size / 2,
-            SOFA_CONFIG.world_size / 2,
-            -SOFA_CONFIG.world_size / 2,
-            SOFA_CONFIG.world_size / 2,
+            -sofa_config.world_size / 2,
+            sofa_config.world_size / 2,
+            -sofa_config.world_size / 2,
+            sofa_config.world_size / 2,
         ],
         cmap="Greys_r",
     )
@@ -112,17 +115,17 @@ def main() -> None:
     fig2, axes2 = plt.subplots(2, 3, figsize=(15, 10))
     axes2 = axes2.flatten()
     extent = [
-        -SOFA_CONFIG.world_size / 2,
-        SOFA_CONFIG.world_size / 2,
-        -SOFA_CONFIG.world_size / 2,
-        SOFA_CONFIG.world_size / 2,
+        -sofa_config.world_size / 2,
+        sofa_config.world_size / 2,
+        -sofa_config.world_size / 2,
+        sofa_config.world_size / 2,
     ]
 
     for i, pose_vals in enumerate(trajectory):
-        mask = rasterizer.corridor_mask(torch.tensor([pose_vals], device=DEVICE))
+        mask = rasterizer.corridor_mask(torch.tensor([pose_vals], device=device))
         sofa = erode(sofa, mask)
         area_pixels = sofa.sum().item()
-        area_world = area_pixels * (SOFA_CONFIG.world_size / SOFA_CONFIG.grid_size) ** 2
+        area_world = area_pixels * (sofa_config.world_size / sofa_config.grid_size) ** 2
 
         px, py, pt = pose_vals
         axes2[i].imshow(

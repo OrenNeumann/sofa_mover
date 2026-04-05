@@ -10,22 +10,6 @@ Pose: TypeAlias = Float[Tensor, "B 3"]
 
 
 @dataclass(frozen=True)
-class GridConfig:
-    """Configuration for a 2D grid mapping pixels to world coordinates.
-
-    The grid is centered at the origin, spanning [-world_size/2, world_size/2]
-    in both axes.
-    """
-
-    grid_size: int = 256
-    world_size: float = 3.0
-
-    @property
-    def pixels_per_unit(self) -> float:
-        return self.grid_size / self.world_size
-
-
-@dataclass(frozen=True)
 class Rectangle:
     """Axis-aligned rectangle in corridor-local coordinates."""
 
@@ -51,11 +35,6 @@ class CorridorGeometry:
             [[r.x_min, r.y_min, r.x_max, r.y_max] for r in self.rectangles],
             device=device,
         )
-
-
-# Default configs
-DEVICE = torch.device("cuda")
-SOFA_CONFIG = GridConfig(grid_size=256, world_size=3.0)
 
 
 def make_l_corridor(
