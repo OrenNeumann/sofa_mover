@@ -73,6 +73,7 @@ class TrainingConfig:
     entropy_coeff: float = 0.01
     critic_coeff: float = 1.0
     max_grad_norm: float = 0.5
+    reward_anneal_time: float = 0.6
     normalize_observation: bool = True
     normalize_reward: bool = True
     device: torch.device = DEVICE

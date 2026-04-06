@@ -45,7 +45,18 @@ pbar = tqdm(
 for data in stack.collector:
     t0 = time.perf_counter()
     next_data = data["next"]
-    raw_reward_mean = next_data["reward"].flatten().mean().item()
+    # Reward shaping: anneal secondary rewards
+    anneal_end = config.total_frames * config.reward_anneal_time
+    shaping_scale = max(0.0, 1.0 - total_env_steps / anneal_end)
+    next_data.set("reward_erosion", next_data["reward_erosion"] * shaping_scale)
+    next_data.set("reward_progress", next_data["reward_progress"] * shaping_scale)
+    next_data.set(
+        "reward",
+        next_data["reward_erosion"]
+        + next_data["reward_progress"]
+        + next_data["reward_terminal"],
+    )
+    mean_reward = next_data["reward"].flatten().mean().item()
     normalized_reward = normalize_rewards_inplace(data, normalizer)
 
     normalizer.freeze = True
@@ -73,17 +84,18 @@ for data in stack.collector:
     elapsed = time.perf_counter() - t0
     fps = batch_frames / elapsed
 
-    raw_erosion = next_data["reward_erosion"].flatten().mean().item()
-    raw_progress = next_data["reward_progress"].flatten().mean().item()
-    raw_terminal = next_data["reward_terminal"].flatten().mean().item()
+    mean_erosion = next_data["reward_erosion"].flatten().mean().item()
+    mean_progress = next_data["reward_progress"].flatten().mean().item()
+    mean_terminal = next_data["reward_terminal"].flatten().mean().item()
     log_payload: dict[str, float | int | Image] = {
         "env_steps": total_env_steps,
         "train/fps": fps,
         "train/mean_reward_normalized": normalized_reward.flatten().mean().item(),
-        "train/mean_reward_raw": raw_reward_mean,
-        "reward/erosion": raw_erosion,
-        "reward/progress": raw_progress,
-        "reward/terminal": raw_terminal,
+        "train/mean_reward_raw": mean_reward,
+        "reward/shaping_scale": shaping_scale,
+        "reward/erosion": mean_erosion,
+        "reward/progress": mean_progress,
+        "reward/terminal": mean_terminal,
         "loss/policy": optimization_stats.loss_policy,
         "loss/critic": optimization_stats.loss_critic,
         "loss/entropy": optimization_stats.loss_entropy,
