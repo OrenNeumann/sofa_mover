@@ -3,6 +3,8 @@
 from pathlib import Path
 
 import torch
+from tensordict.nn import TensorDictModule
+from torchrl.modules import OneHotCategorical, ProbabilisticActor
 
 from sofa_mover.env import make_sofa_env
 from sofa_mover.networks import SofaActorNet, SofaBoundaryEncoder, SofaEncoder
@@ -13,13 +15,14 @@ from sofa_mover.visualization.render import (
     compute_frame_data,
     render_trajectory,
 )
-from tensordict.nn import TensorDictModule
-from torchrl.modules import OneHotCategorical, ProbabilisticActor
+
+DEFAULT_CHECKPOINT_PATH = "output/best_policy.pt"
+DEFAULT_OUTPUT_PATH = "output/agent_trajectory.gif"
 
 
 def evaluate(
-    checkpoint_path: str = "output/best_policy.pt",
-    output_path: str = "output/agent_trajectory.gif",
+    checkpoint_path: str = DEFAULT_CHECKPOINT_PATH,
+    output_path: str = DEFAULT_OUTPUT_PATH,
     device: torch.device | None = None,
 ) -> Path:
     checkpoint = torch.load(
@@ -32,12 +35,11 @@ def evaluate(
     device = training_config.device if device is None else device
 
     env = make_sofa_env(num_envs=1, cfg=cfg, device=device)
-    normalizer = Normalizer.from_config(training_config, num_envs=1)
+    normalizer = Normalizer.from_config(training_config, num_envs=1, device=device)
     normalizer.freeze = True
     if "vec_normalize" in checkpoint:
         normalizer.load_state_dict(checkpoint["vec_normalize"])
 
-    # Rebuild actor with the correct encoder for this checkpoint's config
     encoder: SofaEncoder | SofaBoundaryEncoder
     if cfg.observation_type == "boundary":
         encoder = SofaBoundaryEncoder(
@@ -65,24 +67,20 @@ def evaluate(
     actor.load_state_dict(checkpoint["actor"])
     actor.eval()
 
-    # Deterministic rollout — pose lives in env._pose (internal state)
-    H = cfg.sofa_config.grid_size
+    grid_size = cfg.sofa_config.grid_size
     frames: list[FrameData] = []
 
     def _collect_frame(step: int) -> None:
-        pose_tuple = (
+        pose = (
             env._pose[0, 0].item(),
             env._pose[0, 1].item(),
             env._pose[0, 2].item(),
         )
-        # Reconstruct full grid from cropped sofa for visualization
-        full_sofa = torch.zeros(1, 1, H, H, device=device)
+        full_sofa = torch.zeros(1, 1, grid_size, grid_size, device=device)
         full_sofa[:, :, env._crop_y, env._crop_x] = env._sofa.float()
         corridor_full = env.rasterizer.corridor_mask(env._pose)
         frames.append(
-            compute_frame_data(
-                step, pose_tuple, full_sofa, corridor_full, cfg.sofa_config
-            )
+            compute_frame_data(step, pose, full_sofa, corridor_full, cfg.sofa_config)
         )
 
     with torch.no_grad():
@@ -91,7 +89,6 @@ def evaluate(
         for step in range(cfg.max_steps):
             _collect_frame(step)
 
-            # Greedy action: argmax logits
             td = actor_module(td)
             logits = td["logits"]
             action = torch.zeros_like(logits)
@@ -106,7 +103,9 @@ def evaluate(
 
     out = Path(output_path)
     out.parent.mkdir(exist_ok=True)
-    result = render_trajectory(frames, cfg.sofa_config, out, fps=10)
+    result = render_trajectory(
+        frames, cfg.sofa_config, out, fps=10, corridor_width=cfg.corridor_width
+    )
     print(f"Saved {len(frames)}-frame trajectory to {result}")
     print(f"Final area: {frames[-1].area:.4f}")
     return result

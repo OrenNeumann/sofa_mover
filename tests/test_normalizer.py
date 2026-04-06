@@ -4,8 +4,8 @@ from collections.abc import Generator
 
 import pytest
 import torch
-from tensordict import TensorDictBase
-from tensordict.nn import TensorDictModule
+from tensordict import TensorDictBase  # type: ignore[import-untyped]
+from tensordict.nn import TensorDictModule  # type: ignore[import-untyped]
 
 from sofa_mover.env import SofaEnv, make_sofa_env
 from sofa_mover.networks import SofaActorNet, SofaBoundaryEncoder, SofaEncoder
@@ -165,6 +165,18 @@ class TestRunningMeanStd:
 
 
 class TestObservationNormalization:
+    def test_from_config_respects_device_override(self) -> None:
+        normalizer = Normalizer.from_config(
+            _training_config(),
+            NUM_ENVS,
+            device=TEST_DEVICE,
+        )
+
+        if normalizer._obs_rms is not None:
+            assert normalizer._obs_rms.mean.device == TEST_DEVICE
+        if normalizer._ret_rms is not None:
+            assert normalizer._ret_rms.mean.device == TEST_DEVICE
+
     def test_boundary_actor_forward_updates_observation_stats(self) -> None:
         _cfg, env, normalizer, actor_module = _make_boundary_actor_stack()
 

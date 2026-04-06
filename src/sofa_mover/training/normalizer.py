@@ -117,6 +117,7 @@ class Normalizer:
         cls,
         config: TrainingConfig,
         num_envs: int,
+        device: torch.device | None = None,
     ) -> "Normalizer":
         """Build a Normalizer from a TrainingConfig.
 
@@ -138,7 +139,7 @@ class Normalizer:
         return cls(
             obs_dim=obs_dim,
             num_envs=num_envs,
-            device=config.device,
+            device=config.device if device is None else device,
             gamma=config.gamma,
             norm_obs=norm_obs,
             norm_reward=config.normalize_reward,

@@ -38,3 +38,7 @@ ignore = ["F722", "E402"]  # F722: jaxtyping confuses ruff, E402: warning filter
 mypy_path = "src"
 packages = ["sofa_mover"]
 explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["tensordict", "tensordict.*", "torchrl", "torchrl.*", "tqdm", "tqdm.*"]
+ignore_missing_imports = true
