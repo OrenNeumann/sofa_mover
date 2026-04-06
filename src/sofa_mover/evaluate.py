@@ -34,7 +34,12 @@ def evaluate(
     cfg: SofaEnvConfig = training_config.env
     device = training_config.device if device is None else device
 
-    env = make_sofa_env(num_envs=1, cfg=cfg, device=device)
+    env = make_sofa_env(
+        total_frames=training_config.total_frames,
+        num_envs=1,
+        cfg=cfg,
+        device=device,
+    )
     normalizer = Normalizer.from_config(training_config, num_envs=1, device=device)
     normalizer.freeze = True
     if "vec_normalize" in checkpoint:

@@ -57,7 +57,7 @@ def test_corridor_mask_area(device: torch.device) -> None:
     corridor_width = 1.0
     geometry = make_l_corridor(corridor_width=corridor_width)
     config = GridConfig(grid_size=256, world_size=6.0)
-    rasterizer = Rasterizer(geometry, config, device=device, compile=False)
+    rasterizer = Rasterizer(geometry, config, device=device)
 
     mask = rasterizer.corridor_mask(torch.tensor([[0.0, 0.0, 0.0]], device=device))
     assert mask.shape == (1, 1, 256, 256)
@@ -87,7 +87,7 @@ def test_corridor_corner_is_passable(device: torch.device) -> None:
     """The corner region (around origin) should be passable."""
     geometry = make_l_corridor()
     config = GridConfig(grid_size=256, world_size=6.0)
-    rasterizer = Rasterizer(geometry, config, device=device, compile=False)
+    rasterizer = Rasterizer(geometry, config, device=device)
 
     mask = rasterizer.corridor_mask(torch.tensor([[0.0, 0.0, 0.0]], device=device))
 

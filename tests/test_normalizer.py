@@ -27,6 +27,7 @@ TEST_DEVICE = torch.device("cpu")
 TEST_SOFA = GridConfig(grid_size=32, world_size=3.0)
 NUM_ENVS = 4
 BOUNDARY_RAYS = 64
+TEST_TOTAL_FRAMES = 1_000_000
 
 
 def _test_cfg(
@@ -37,7 +38,6 @@ def _test_cfg(
     return SofaEnvConfig(
         sofa_config=TEST_SOFA,
         max_steps=20,
-        compile_rasterizer=False,
         observation_type=observation_type,
         boundary_rays=boundary_rays,
     )
@@ -63,7 +63,10 @@ def _training_config(
 
 def _make_env(cfg: SofaEnvConfig | None = None) -> SofaEnv:
     return make_sofa_env(
-        num_envs=NUM_ENVS, cfg=_test_cfg() if cfg is None else cfg, device=TEST_DEVICE
+        total_frames=TEST_TOTAL_FRAMES,
+        num_envs=NUM_ENVS,
+        cfg=_test_cfg() if cfg is None else cfg,
+        device=TEST_DEVICE,
     )
 
 

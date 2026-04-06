@@ -45,6 +45,7 @@ def build_training_stack(
 
     # --- Environment ---
     env = make_sofa_env(
+        total_frames=config.total_frames,
         num_envs=num_envs,
         cfg=env_cfg,
         device=device,

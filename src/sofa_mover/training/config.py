@@ -31,7 +31,6 @@ class SofaEnvConfig:
     """Hyperparameters for the SofaEnv."""
 
     sofa_config: GridConfig = SOFA_CONFIG
-    compile_rasterizer: bool = True
     corridor_width: float = 1.0
     delta_xy: float = 0.05
     delta_theta: float = math.pi / 60
@@ -53,6 +52,7 @@ class SofaEnvConfig:
     # Boundary sofa-view: number of rays sampled from the sofa contour.
     # Only used for "boundary" observations.
     boundary_rays: int = 128
+    reward_anneal_time: float = 0.6
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,6 @@ class TrainingConfig:
     entropy_coeff: float = 0.01
     critic_coeff: float = 1.0
     max_grad_norm: float = 0.5
-    reward_anneal_time: float = 0.6
     normalize_observation: bool = True
     normalize_reward: bool = True
     device: torch.device = DEVICE

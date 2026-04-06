@@ -24,7 +24,7 @@ def main(
     output_dir.mkdir(exist_ok=True)
 
     geometry = make_l_corridor()
-    rasterizer = Rasterizer(geometry, sofa_config, device=device, compile=False)
+    rasterizer = Rasterizer(geometry, sofa_config, device=device)
     sofa = torch.ones(1, 1, sofa_config.grid_size, sofa_config.grid_size, device=device)
 
     # --- Figure 1: Corridor masks at various poses ---
@@ -36,7 +36,6 @@ def main(
         geometry,
         overview_config,
         device=device,
-        compile=False,
     )
     template_view = large_rasterizer.corridor_mask(
         torch.tensor([[0.0, 0.0, 0.0]], device=device)

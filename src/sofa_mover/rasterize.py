@@ -89,7 +89,6 @@ class Rasterizer:
         geometry: CorridorGeometry,
         sofa_config: GridConfig = SOFA_CONFIG,
         device: torch.device = torch.device("cuda"),
-        compile: bool = True,
     ) -> None:
         self.geometry = geometry
         self.sofa_config = sofa_config
@@ -101,13 +100,8 @@ class Rasterizer:
         self._x_grid: Tensor = x_grid
         self._y_grid: Tensor = y_grid
         self._rect_bounds: Tensor = geometry.to_tensor(device)
-
-        if compile:
-            self._corridor_mask_fn = torch.compile(_analytical_corridor_mask)
-            self._swept_mask_fn = torch.compile(_analytical_swept_mask)
-        else:
-            self._corridor_mask_fn = _analytical_corridor_mask
-            self._swept_mask_fn = _analytical_swept_mask
+        self._corridor_mask_fn = torch.compile(_analytical_corridor_mask)
+        self._swept_mask_fn = torch.compile(_analytical_swept_mask)
 
     @property
     def device(self) -> torch.device:

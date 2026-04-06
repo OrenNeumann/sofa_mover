@@ -59,12 +59,15 @@ class SofaEnv(EnvBase):
     def __init__(
         self,
         num_envs: int,
+        total_frames: int,
         cfg: SofaEnvConfig = SofaEnvConfig(),
         device: torch.device = DEVICE,
     ) -> None:
         super().__init__(device=device, batch_size=torch.Size([num_envs]))
         self.cfg = cfg
         self.num_envs = num_envs
+        self.steps_count = 0
+        self._anneal_end = total_frames * cfg.reward_anneal_time
 
         # Build corridor geometry and rasterizer
         geometry = make_l_corridor(corridor_width=cfg.corridor_width)
@@ -72,7 +75,6 @@ class SofaEnv(EnvBase):
             geometry,
             cfg.sofa_config,
             device=device,
-            compile=cfg.compile_rasterizer,
         )
 
         # Action decode table: 27 actions → (dx, dy, dθ)
@@ -210,6 +212,10 @@ class SofaEnv(EnvBase):
             device=self.device,
         )
 
+    @property
+    def shaping_scale(self) -> float:
+        return max(0.0, 1.0 - self.steps_count / self._anneal_end)
+
     @staticmethod
     def _compute_start_mask(
         pose: Pose,
@@ -281,9 +287,7 @@ class SofaEnv(EnvBase):
         com = _sofa_com(self._sofa, self.x_grid, self.y_grid)
         goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, self._pose)
         self._goal_dist = (com - goal_sofa).norm(dim=-1)  # (B,)
-        progress = 1.0 - self._goal_dist.unsqueeze(1) / max(
-            self.initial_goal_dist, 1e-8
-        )
+        progress = 1.0 - self._goal_dist.unsqueeze(1) / self.initial_goal_dist
 
         return TensorDict(
             {
@@ -353,17 +357,20 @@ class SofaEnv(EnvBase):
 
         # --- Reward ---
         area_lost = (area_before - area_after).clamp(min=0.0)  # (B,)
-        erosion_penalty = -cfg.lambda_erosion * area_lost
-        # Dense progress: reward for reducing distance to goal
+        # penalty for losing area
+        erosion_penalty = -cfg.lambda_erosion * area_lost * self.shaping_scale
+        # reward for getting closer to goal
         progress_bonus = (
             cfg.lambda_progress
             * (self._goal_dist - goal_dist)
-            / max(self.initial_goal_dist, 1e-8)
+            / self.initial_goal_dist
+            * self.shaping_scale
         )
         terminal_bonus = goal_reached.float() * area_after
         reward = (erosion_penalty + progress_bonus + terminal_bonus).unsqueeze(1)
 
         # Update internal state
+        self.steps_count += B
         self._sofa = new_sofa
         self._pose = pose_next
         self._goal_dist = goal_dist
@@ -374,7 +381,7 @@ class SofaEnv(EnvBase):
             sofa_view = self._downscale_obs(new_sofa.to(torch.uint8))
 
         # Progress = 1 - (dist_to_goal / initial_dist)
-        progress = 1.0 - goal_dist.unsqueeze(1) / max(self.initial_goal_dist, 1e-8)
+        progress = 1.0 - goal_dist.unsqueeze(1) / self.initial_goal_dist
 
         return TensorDict(
             {
@@ -407,9 +414,15 @@ class SofaEnv(EnvBase):
 
 
 def make_sofa_env(
+    total_frames: int,
     num_envs: int = 256,
     cfg: SofaEnvConfig = SofaEnvConfig(),
     device: torch.device = DEVICE,
 ) -> SofaEnv:
     """Factory function for SofaEnv with sensible defaults."""
-    return SofaEnv(num_envs=num_envs, cfg=cfg, device=device)
+    return SofaEnv(
+        num_envs=num_envs,
+        total_frames=total_frames,
+        cfg=cfg,
+        device=device,
+    )

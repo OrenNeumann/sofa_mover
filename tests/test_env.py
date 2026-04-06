@@ -14,13 +14,13 @@ TEST_DEVICE = torch.device("cpu")
 TEST_SOFA = GridConfig(grid_size=32, world_size=3.0)
 NUM_ENVS = 2
 H = TEST_SOFA.grid_size
+TEST_TOTAL_FRAMES = 1_000_000
 
 
 def _test_cfg(**overrides: object) -> SofaEnvConfig:
     defaults: dict[str, object] = dict(
         sofa_config=TEST_SOFA,
         max_steps=20,
-        compile_rasterizer=False,
         observation_type="grid",
         boundary_rays=0,
     )
@@ -31,7 +31,12 @@ def _test_cfg(**overrides: object) -> SofaEnvConfig:
 @pytest.fixture(scope="module")
 def env():
     """Shared env instance — small grid on CPU for speed."""
-    return make_sofa_env(num_envs=NUM_ENVS, cfg=_test_cfg(), device=TEST_DEVICE)
+    return make_sofa_env(
+        total_frames=TEST_TOTAL_FRAMES,
+        num_envs=NUM_ENVS,
+        cfg=_test_cfg(),
+        device=TEST_DEVICE,
+    )
 
 
 def _noop_action(B: int) -> torch.Tensor:
@@ -144,7 +149,12 @@ class TestGoalDetection:
             max_steps=100,
             goal_radius=0.5,
         )
-        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        env = make_sofa_env(
+            total_frames=TEST_TOTAL_FRAMES,
+            num_envs=1,
+            cfg=cfg,
+            device=TEST_DEVICE,
+        )
         td = env.reset()
         for _ in range(100):
             # dx=0, dy=-d, dt=+d  →  index = 1*9 + 0*3 + 2 = 11
@@ -159,7 +169,12 @@ class TestGoalDetection:
     def test_progress_increases_toward_goal(self) -> None:
         """Moving toward the goal should increase progress."""
         cfg = _test_cfg(delta_xy=0.3, delta_theta=math.pi / 8)
-        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        env = make_sofa_env(
+            total_frames=TEST_TOTAL_FRAMES,
+            num_envs=1,
+            cfg=cfg,
+            device=TEST_DEVICE,
+        )
         td = env.reset()
         initial_progress = td["observation", "progress"][0].item()
         # Move: translate down + rotate (navigating the bend)
@@ -194,7 +209,12 @@ class TestEpisodeAccumulators:
 
     def test_accumulators_increase_over_steps(self) -> None:
         cfg = _test_cfg()
-        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        env = make_sofa_env(
+            total_frames=TEST_TOTAL_FRAMES,
+            num_envs=1,
+            cfg=cfg,
+            device=TEST_DEVICE,
+        )
         td = env.reset()
         # Action 0 = (-delta_xy, -delta_xy, -delta_theta) — moves in all axes
         action = torch.zeros(1, 27, device=TEST_DEVICE)
@@ -213,7 +233,12 @@ class TestEpisodeAccumulators:
 
     def test_accumulators_reset_on_done(self) -> None:
         cfg = _test_cfg(max_steps=3)
-        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        env = make_sofa_env(
+            total_frames=TEST_TOTAL_FRAMES,
+            num_envs=1,
+            cfg=cfg,
+            device=TEST_DEVICE,
+        )
         td = env.reset()
         # Run to truncation with non-noop actions
         action = torch.zeros(1, 27, device=TEST_DEVICE)
@@ -234,7 +259,12 @@ class TestEpisodeAccumulators:
     def test_terminal_area_zero_on_truncation(self) -> None:
         """terminal_area should be 0 when episode ends by truncation."""
         cfg = _test_cfg(max_steps=3)
-        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        env = make_sofa_env(
+            total_frames=TEST_TOTAL_FRAMES,
+            num_envs=1,
+            cfg=cfg,
+            device=TEST_DEVICE,
+        )
         td = env.reset()
         for _ in range(3):
             td["action"] = _noop_action(1)
@@ -247,7 +277,12 @@ class TestEpisodeAccumulators:
         """terminal_area should be positive when the goal is reached."""
         # goal_radius=10 guarantees immediate goal reach on first step
         cfg = _test_cfg(goal_radius=10.0)
-        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        env = make_sofa_env(
+            total_frames=TEST_TOTAL_FRAMES,
+            num_envs=1,
+            cfg=cfg,
+            device=TEST_DEVICE,
+        )
         td = env.reset()
         td["action"] = _noop_action(1)
         td = env.step(td)["next"]
@@ -258,7 +293,12 @@ class TestEpisodeAccumulators:
 class TestObsModes:
     def test_downscale(self) -> None:
         cfg = _test_cfg(obs_downscale=2)
-        env = make_sofa_env(num_envs=1, cfg=cfg, device=TEST_DEVICE)
+        env = make_sofa_env(
+            total_frames=TEST_TOTAL_FRAMES,
+            num_envs=1,
+            cfg=cfg,
+            device=TEST_DEVICE,
+        )
         td = env.reset()
         obs = td["observation", "sofa_view"]
         assert obs.shape[1] == 1
@@ -270,7 +310,12 @@ class TestObsModes:
 
     def test_boundary_mode(self) -> None:
         cfg = _test_cfg(observation_type="boundary", boundary_rays=64)
-        env = make_sofa_env(num_envs=2, cfg=cfg, device=TEST_DEVICE)
+        env = make_sofa_env(
+            total_frames=TEST_TOTAL_FRAMES,
+            num_envs=2,
+            cfg=cfg,
+            device=TEST_DEVICE,
+        )
         td = env.reset()
         obs = td["observation", "sofa_view"]
         assert obs.shape == (2, 64)
