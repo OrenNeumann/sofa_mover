@@ -21,11 +21,3 @@ To render a specific checkpoint after training:
 ```bash
 uv run python -c "from sofa_mover.evaluate import evaluate; evaluate('output/final_policy.pt', 'output/final_policy.gif')"
 ```
-
-## Benchmarking
-
-Find max batch size and FPS for three representative observation configs: (temporary)
-
-```bash
-uv run python bench_optimization.py
-```

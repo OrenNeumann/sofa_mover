@@ -1,18 +1,17 @@
 """Rendering utilities for sofa erosion trajectory videos."""
 
 import warnings
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
 
 import matplotlib
-import matplotlib.animation
 import matplotlib.pyplot as plt
-from matplotlib.artist import Artist
 import numpy as np
 from jaxtyping import Float
 from numpy.typing import NDArray
+from PIL import GifImagePlugin, Image
 from torch import Tensor
 from tqdm import TqdmExperimentalWarning
 from tqdm.rich import tqdm
@@ -313,6 +312,40 @@ def rotate_extent_counterclockwise(extent: Extent) -> Extent:
     return (-y_max, -y_min, x_min, x_max)
 
 
+def _render_palette_frame(fig: matplotlib.figure.Figure) -> Image.Image:
+    """Rasterize the current figure into a paletted image for GIF encoding."""
+    fig.canvas.draw()
+    rgba = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    return Image.fromarray(rgba, mode="RGBA").convert("P", palette=Image.ADAPTIVE)
+
+
+def _write_streaming_gif(
+    fig: matplotlib.figure.Figure,
+    output_path: Path,
+    fps: int,
+    num_frames: int,
+    draw_frame: Callable[[int], None],
+) -> None:
+    """Write a GIF incrementally so long trajectories do not fill memory."""
+    frame_duration_ms = max(1, round(1000 / fps))
+    with output_path.open("wb") as file_obj:
+        for frame_idx in range(num_frames):
+            draw_frame(frame_idx)
+            frame = _render_palette_frame(fig)
+            encoder_info: dict[str, int | bool] = {
+                "duration": frame_duration_ms,
+                "disposal": 2,
+            }
+            if frame_idx == 0:
+                for block in GifImagePlugin._get_global_header(frame, {"loop": 0}):
+                    file_obj.write(block)
+            else:
+                encoder_info["include_color_table"] = True
+            GifImagePlugin._write_frame_data(file_obj, frame, (0, 0), encoder_info)
+        file_obj.write(b";")
+        file_obj.flush()
+
+
 # ---------------------------------------------------------------------------
 # Main render entry point
 # ---------------------------------------------------------------------------
@@ -372,7 +405,7 @@ def render_trajectory(
 
     final_sofa = frames[-1].sofa
 
-    def update(frame_idx: int) -> Iterable[Artist]:
+    def draw_frame(frame_idx: int) -> None:
         frame = frames[frame_idx]
 
         left_sofa = sample_image_in_extent(
@@ -407,24 +440,15 @@ def render_trajectory(
             f"Step {frame.step}: corridor frame, 90\u00b0 counterclockwise\n"
             f"fixed final sofa, area={frames[-1].area:.3f}"
         )
-        return (left_artist, left_title, right_artist, right_title)
-
-    anim = matplotlib.animation.FuncAnimation(
-        fig,
-        update,
-        frames=len(frames),
-        blit=False,
-        interval=1000 // fps,
-    )
 
     gif_path = output_path.with_suffix(".gif")
-    writer = matplotlib.animation.PillowWriter(fps=fps)
     with tqdm(total=len(frames), desc="Rendering", unit="frame") as pbar:
-        anim.save(
-            str(gif_path),
-            writer=writer,
-            progress_callback=lambda i, n: pbar.update(1),
-        )
+
+        def render_and_update(frame_idx: int) -> None:
+            draw_frame(frame_idx)
+            pbar.update(1)
+
+        _write_streaming_gif(fig, gif_path, fps, len(frames), render_and_update)
 
     plt.close(fig)
     return gif_path
