@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 import torch
-from tqdm.rich import tqdm
+from tqdm import tqdm
 from wandb.sdk import init as wandb_init
 from wandb.sdk.data_types.image import Image
 
@@ -13,7 +13,7 @@ from sofa_mover.training.config import TrainingConfig
 from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.training.stack import build_training_stack
 from sofa_mover.training.utils import (
-    compute_gae_minibatch,
+    compute_gae_direct,
     extract_episode_metrics,
     maybe_build_episode_composite,
     normalize_rewards_inplace,
@@ -25,14 +25,16 @@ config = TrainingConfig()
 output_path = Path(config.output_dir)
 output_path.mkdir(exist_ok=True)
 run = wandb_init(project=config.wandb_project)
-run.define_metric("env_steps")
-run.define_metric("*", step_metric="env_steps")
+run.define_metric("total_steps")
+run.define_metric("*", step_metric="total_steps")
 stack = build_training_stack(config)
 normalizer: Normalizer = stack.normalizer
 
 # --- Training loop ---
 best_area_at_goal = 0.0
 batch_idx = 0
+total_steps = 0
+training_start = time.perf_counter()
 pbar = tqdm(
     total=config.total_frames,
     desc="Training",
@@ -48,9 +50,14 @@ for data in stack.collector:
     normalized_reward = normalize_rewards_inplace(data, normalizer)
 
     normalizer.freeze = True
-    # Compute GAE advantages in minibatches (avoids converting the full
-    # obs buffer to float32 at once, which OOMs for large B)
-    compute_gae_minibatch(data, stack.loss_module, config.minibatch_size)
+    # Compute GAE advantages directly (bypasses TorchRL's vmap overhead)
+    compute_gae_direct(
+        data,
+        stack.loss_module,
+        stack.critic_net,
+        config.gamma,
+        config.gae_lambda,
+    )
 
     # Flatten time dimension for minibatch iteration
     data_flat = data.reshape(-1)
@@ -68,12 +75,15 @@ for data in stack.collector:
 
     # --- Logging ---
     batch_frames = data.numel()
-    elapsed = time.perf_counter() - t0
-    fps = batch_frames / elapsed
+    total_steps += batch_frames
+    walltime = time.perf_counter() - training_start
+    batch_fps = batch_frames / (time.perf_counter() - t0)
 
     log_payload: dict[str, float | int | Image] = {
-        "env_steps": stack.env.steps_count,
-        "train/fps": fps,
+        "total_steps": total_steps,
+        "train/walltime": walltime,
+        "train/steps_per_second": total_steps / walltime,
+        "train/batch_fps": batch_fps,
         "train/mean_reward_normalized": normalized_reward.flatten().mean().item(),
         "train/mean_reward_raw": mean_reward,
         "reward/shaping_scale": stack.env.shaping_scale,

@@ -8,6 +8,7 @@ from tensordict import TensorDictBase
 from torchrl.objectives import ClipPPOLoss
 
 from sofa_mover.env import SofaEnv
+from sofa_mover.networks import SofaCriticNet
 from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.visualization.render import build_composite
 
@@ -37,35 +38,56 @@ class EpisodeMetrics:
     last_done_idx: int
 
 
-def compute_gae_minibatch(
+def compute_gae_direct(
     data: TensorDictBase,
     loss_module: ClipPPOLoss,
-    minibatch_size: int,
+    critic_net: SofaCriticNet,
+    gamma: float,
+    gae_lambda: float,
 ) -> None:
-    """Compute GAE advantages in env-dimension chunks to avoid OOM.
+    """Compute GAE advantages by calling the critic directly.
 
-    Processing the full (BxT) buffer at once converts all uint8 obs to
-    float32 simultaneously (~5 GiB for B=256, T=64). Chunking along B
-    keeps peak memory proportional to minibatch_size.
+    Avoids TorchRL's vmap-based value estimation.
+    Batches current + next state value predictions into a single forward pass.
     """
-    batch_size, rollout_length = data.shape
-    env_chunk = max(1, minibatch_size // rollout_length)
+    B, T = data.shape
     adv_key = loss_module.tensor_keys.advantage
     vt_key = loss_module.tensor_keys.value_target
-    advantages: list[torch.Tensor] = []
-    value_targets: list[torch.Tensor] = []
+
     with torch.no_grad():
-        for start in range(0, batch_size, env_chunk):
-            chunk = data[start : start + env_chunk]
-            loss_module.value_estimator(
-                chunk,
-                params=loss_module.critic_network_params,
-                target_params=loss_module.target_critic_network_params,
-            )
-            advantages.append(chunk[adv_key])
-            value_targets.append(chunk[vt_key])
-    data.set(adv_key, torch.cat(advantages, dim=0))
-    data.set(vt_key, torch.cat(value_targets, dim=0))
+        # Extract raw observation tensors (B, T, ...)
+        obs = data["observation"]
+        next_obs = data["next", "observation"]
+
+        # Concatenate current and next obs for a single critic call (2*B*T)
+        all_sv = torch.cat(
+            [obs["sofa_view"].flatten(0, 1), next_obs["sofa_view"].flatten(0, 1)]
+        )
+        all_p = torch.cat([obs["pose"].flatten(0, 1), next_obs["pose"].flatten(0, 1)])
+        all_pr = torch.cat(
+            [obs["progress"].flatten(0, 1), next_obs["progress"].flatten(0, 1)]
+        )
+
+        all_values = critic_net(all_sv, all_p, all_pr)  # (2*B*T, 1)
+        values, next_values = all_values.reshape(2, B, T, 1).unbind(0)
+
+        reward = data["next", "reward"]  # (B, T, 1)
+        done = data["next", "done"].float()  # (B, T, 1)
+        terminated = data["next", "terminated"].float()  # (B, T, 1)
+
+        # TD-error: delta = r + gamma * (1 - terminated) * V_next - V
+        delta = reward + gamma * (1.0 - terminated) * next_values - values
+
+        # Backward GAE scan
+        advantages = torch.empty_like(delta)
+        last_gae = torch.zeros(B, 1, device=delta.device, dtype=delta.dtype)
+        for t in reversed(range(T)):
+            not_done = 1.0 - done[:, t]
+            last_gae = delta[:, t] + gamma * gae_lambda * not_done * last_gae
+            advantages[:, t] = last_gae
+
+    data.set(adv_key, advantages)
+    data.set(vt_key, advantages + values)
 
 
 # TODO: hacky, clean up
@@ -97,11 +119,13 @@ def optimize_ppo_epochs(
     grad_norm = 0.0
     last_loss_td: TensorDictBase | None = None
     for _epoch in range(num_epochs):
+        # Shuffle once and slice contiguously (much faster than random indexing
+        # into TensorDicts, which gathers every nested tensor individually).
         perm = torch.randperm(total_samples, device=device)
+        shuffled = data_flat[perm]
         for mb_start in range(0, total_samples, minibatch_size):
             mb_end = min(mb_start + minibatch_size, total_samples)
-            mb_idx = perm[mb_start:mb_end]
-            minibatch = data_flat[mb_idx]
+            minibatch = shuffled[mb_start:mb_end]
 
             loss_td = loss_module(minibatch)
             loss = (
@@ -110,7 +134,7 @@ def optimize_ppo_epochs(
                 + loss_td["loss_entropy"]
             )
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 loss_module.parameters(), max_grad_norm

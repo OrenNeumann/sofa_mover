@@ -17,7 +17,7 @@ from sofa_mover.training.config import (
 )
 from sofa_mover.training.stack import build_training_stack, TrainingStack
 from sofa_mover.training.utils import (
-    compute_gae_minibatch,
+    compute_gae_direct,
     normalize_rewards_inplace,
     optimize_ppo_epochs,
 )
@@ -279,10 +279,12 @@ class TestStateAndIntegration:
         assert not torch.allclose(normalized_reward, raw_reward)
 
         training_stack.normalizer.freeze = True
-        compute_gae_minibatch(
+        compute_gae_direct(
             data,
             training_stack.loss_module,
-            config.minibatch_size,
+            training_stack.critic_net,
+            config.gamma,
+            config.gae_lambda,
         )
         optimization_stats = optimize_ppo_epochs(
             data.reshape(-1),

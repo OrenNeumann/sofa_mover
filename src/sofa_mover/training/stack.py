@@ -27,6 +27,7 @@ class TrainingStack:
     env: SofaEnv
     normalizer: Normalizer
     actor_net: SofaActorNet
+    critic_net: SofaCriticNet
     actor: ProbabilisticActor
     critic: ValueOperator
     loss_module: ClipPPOLoss
@@ -109,7 +110,7 @@ def build_training_stack(
     )
 
     # --- Optimizer + LR schedule ---
-    optimizer = torch.optim.Adam(loss_module.parameters(), lr=config.lr)
+    optimizer = torch.optim.Adam(loss_module.parameters(), lr=config.lr, fused=True)
     total_batches = config.total_frames // (num_envs * config.rollout_length)
     lr_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
@@ -131,6 +132,7 @@ def build_training_stack(
         env=env,
         normalizer=normalizer,
         actor_net=actor_net,
+        critic_net=critic_net,
         actor=actor,
         critic=critic,
         loss_module=loss_module,
