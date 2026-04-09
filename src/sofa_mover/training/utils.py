@@ -11,11 +11,9 @@ from torchrl.objectives import ClipPPOLoss
 
 from sofa_mover.env import SofaEnv
 from sofa_mover.networks import SofaActorNet, SofaCriticNet
-from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.visualization.render import build_composite
 
 
-# TODO: some of these are more core logic than helpers, maybe reorganize
 @dataclass(frozen=True)
 class OptimizationStats:
     """Scalar summaries from PPO optimization."""
@@ -92,19 +90,6 @@ def compute_gae_direct(
     data.set(vt_key, advantages + values)
 
 
-# TODO: hacky, clean up
-def normalize_rewards_inplace(
-    data: TensorDictBase, normalizer: Normalizer
-) -> torch.Tensor:
-    """Normalize rollout rewards in-place and return the normalized tensor."""
-    normalized_reward = normalizer.normalize_rewards(
-        data["next", "reward"],
-        data["next", "done"],
-    )
-    data["next"].set("reward", normalized_reward)
-    return normalized_reward
-
-
 def optimize_ppo_epochs(
     data_flat: TensorDictBase,
     loss_module: ClipPPOLoss,
@@ -142,8 +127,7 @@ def optimize_ppo_epochs(
     actor_head = actor_net.head
     critic_head = critic_net.head
 
-    grad_norm = 0.0
-    last_losses: tuple[float, float, float] | None = None
+    last_stats: OptimizationStats | None = None
 
     for _epoch in range(num_epochs):
         # Shuffle all tensors together with a single permutation.
@@ -190,18 +174,17 @@ def optimize_ppo_epochs(
                 loss_module.parameters(), max_grad_norm
             ).item()
             optimizer.step()
-            # TODO: use named tuple here
-            last_losses = (loss_pol.item(), loss_crit.item(), loss_ent.item())
+            last_stats = OptimizationStats(
+                loss_policy=loss_pol.item(),
+                loss_critic=loss_crit.item(),
+                loss_entropy=loss_ent.item(),
+                grad_norm=grad_norm,
+            )
 
-    if last_losses is None:
+    if last_stats is None:
         raise RuntimeError("PPO optimization ran with zero minibatches.")
 
-    return OptimizationStats(
-        loss_policy=last_losses[0],
-        loss_critic=last_losses[1],
-        loss_entropy=last_losses[2],
-        grad_norm=grad_norm,
-    )
+    return last_stats
 
 
 def extract_episode_metrics(data_flat: TensorDictBase) -> EpisodeMetrics | None:

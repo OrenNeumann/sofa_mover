@@ -33,7 +33,7 @@ def _sofa_com(
     y_grid: Float[Tensor, "H W"],
 ) -> Float[Tensor, "B 2"]:
     """Compute center of mass of sofa grids."""
-    mass = sofa[:, 0].float()  # (B, H, W) # TODO: is this bool or float?
+    mass = sofa[:, 0].float()  # (B, H, W)
     total = mass.sum(dim=(-2, -1)).clamp(min=1e-8)  # (B,)
     cx = (mass * x_grid).sum(dim=(-2, -1)) / total
     cy = (mass * y_grid).sum(dim=(-2, -1)) / total
@@ -124,9 +124,7 @@ class SofaEnv(EnvBase):
         )
 
         init_pose = torch.tensor([list(cfg.initial_pose)], device=device)
-        init_sofa = self.rasterizer.corridor_mask(
-            init_pose
-        )  # all True by construction (TODO: check)
+        init_sofa = self.rasterizer.corridor_mask(init_pose)
         self.initial_area = init_sofa.sum().item() * self.cell_area
         init_com = _sofa_com(init_sofa, self.x_grid, self.y_grid)
         init_goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, init_pose)
@@ -244,9 +242,9 @@ class SofaEnv(EnvBase):
 
             h, w = self._sofa.shape[2], self._sofa.shape[3]
             fresh_sofa = torch.ones(n_reset, 1, h, w, dtype=torch.bool, device=device)
-            # TODO: At the initial pose all pixels are inside the corridor by
-            # construction, so this erode is effectively a no-op. replace with assert.
-            fresh_sofa = fresh_sofa & self.rasterizer.corridor_mask(initial_pose)
+            assert self.rasterizer.corridor_mask(
+                initial_pose
+            ).all(), "Initial pose should place sofa fully inside the corridor"
 
             self._sofa[reset_mask] = fresh_sofa
             self._pose[reset_mask] = initial_pose

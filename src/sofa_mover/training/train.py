@@ -16,7 +16,6 @@ from sofa_mover.training.utils import (
     compute_gae_direct,
     extract_episode_metrics,
     maybe_build_episode_composite,
-    normalize_rewards_inplace,
     optimize_ppo_epochs,
 )
 
@@ -47,7 +46,10 @@ for data in stack.collector:
     t0 = time.perf_counter()
     next_data = data["next"]
     mean_reward = next_data["reward"].flatten().mean().item()
-    normalized_reward = normalize_rewards_inplace(data, normalizer)
+    normalized_reward = normalizer.normalize_rewards(
+        data["next", "reward"], data["next", "done"]
+    )
+    data["next"].set("reward", normalized_reward)
 
     normalizer.freeze = True
     # Compute GAE advantages directly (bypasses TorchRL's vmap overhead)

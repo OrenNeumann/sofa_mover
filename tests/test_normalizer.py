@@ -18,7 +18,6 @@ from sofa_mover.training.config import (
 from sofa_mover.training.stack import build_training_stack, TrainingStack
 from sofa_mover.training.utils import (
     compute_gae_direct,
-    normalize_rewards_inplace,
     optimize_ppo_epochs,
 )
 from sofa_mover.training.normalizer import Normalizer, RunningMeanStd
@@ -240,7 +239,10 @@ class TestRewardNormalization:
             key: data["next", key].clone()
             for key in ("reward_erosion", "reward_progress", "reward_terminal")
         }
-        normalize_rewards_inplace(data, training_stack.normalizer)
+        normalized = training_stack.normalizer.normalize_rewards(
+            data["next", "reward"], data["next", "done"]
+        )
+        data["next"].set("reward", normalized)
         for key, raw_value in raw_reward_components.items():
             assert torch.equal(data["next", key], raw_value)
 
@@ -275,7 +277,10 @@ class TestStateAndIntegration:
         assert training_stack.normalizer._obs_rms is not None
         assert training_stack.normalizer._obs_rms.count > 1e-4
 
-        normalized_reward = normalize_rewards_inplace(data, training_stack.normalizer)
+        normalized_reward = training_stack.normalizer.normalize_rewards(
+            data["next", "reward"], data["next", "done"]
+        )
+        data["next"].set("reward", normalized_reward)
         assert not torch.allclose(normalized_reward, raw_reward)
 
         training_stack.normalizer.freeze = True
