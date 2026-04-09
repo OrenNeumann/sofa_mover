@@ -68,14 +68,6 @@ class SofaEnv(EnvBase):
         self.steps_count = 0
         self._anneal_end = total_frames * cfg.reward_anneal_time
 
-        # Build corridor geometry and rasterizer
-        geometry = make_l_corridor(corridor_width=cfg.corridor_width)
-        self.rasterizer = Rasterizer(
-            geometry,
-            cfg.sofa_config,
-            device=device,
-        )
-
         # Action decode table: 27 actions → (dx, dy, dθ)
         deltas_xy = torch.tensor([-cfg.delta_xy, 0.0, cfg.delta_xy], device=device)
         deltas_theta = torch.tensor(
@@ -113,7 +105,16 @@ class SofaEnv(EnvBase):
         x_coords = torch.linspace(-hw, hw, grid_w, device=device)
         y_coords = torch.linspace(back_y, front_y, grid_h, device=device)
         self.y_grid, self.x_grid = torch.meshgrid(y_coords, x_coords, indexing="ij")
-        self.rasterizer.set_grids(self.x_grid, self.y_grid)
+
+        # Build corridor geometry and rasterizer (with the sofa's cropped grid)
+        geometry = make_l_corridor(corridor_width=cfg.corridor_width)
+        self.rasterizer = Rasterizer(
+            geometry,
+            cfg.sofa_config,
+            device=device,
+            x_grid=self.x_grid,
+            y_grid=self.y_grid,
+        )
 
         # World-coordinate extent of the sofa grid (for rendering)
         self.sofa_extent: tuple[float, float, float, float] = (

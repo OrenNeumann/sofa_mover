@@ -55,7 +55,6 @@ for data in stack.collector:
     # Compute GAE advantages directly (bypasses TorchRL's vmap overhead)
     compute_gae_direct(
         data,
-        stack.loss_module,
         stack.critic_net,
         config.gamma,
         config.gae_lambda,
@@ -65,7 +64,6 @@ for data in stack.collector:
     data_flat = data.reshape(-1)
     optimization_stats = optimize_ppo_epochs(
         data_flat,
-        stack.loss_module,
         stack.actor_net,
         stack.critic_net,
         stack.optimizer,
@@ -135,7 +133,6 @@ for data in stack.collector:
             {
                 "actor": dict(stack.actor.state_dict()),
                 "critic": dict(stack.critic.state_dict()),
-                "encoder": dict(stack.actor_net.encoder.state_dict()),
                 "vec_normalize": normalizer.state_dict(),
                 "config": config,
                 "batch_idx": batch_idx,

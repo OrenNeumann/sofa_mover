@@ -1,5 +1,6 @@
 """Standalone training helpers."""
 
+import itertools
 from dataclasses import dataclass
 
 import numpy as np
@@ -7,11 +8,15 @@ import torch
 import torch.nn.functional as F
 from tensordict import TensorDictBase
 from torchrl.modules import OneHotCategorical
-from torchrl.objectives import ClipPPOLoss
 
 from sofa_mover.env import SofaEnv
 from sofa_mover.networks import SofaActorNet, SofaCriticNet
 from sofa_mover.visualization.render import build_composite
+
+# TensorDict keys set by TorchRL's ProbabilisticActor / used by GAE computation
+_ADV_KEY = "advantage"
+_VT_KEY = "value_target"
+_SAMPLE_LOG_PROB_KEY = "action_log_prob"
 
 
 @dataclass(frozen=True)
@@ -40,7 +45,6 @@ class EpisodeMetrics:
 
 def compute_gae_direct(
     data: TensorDictBase,
-    loss_module: ClipPPOLoss,
     critic_net: SofaCriticNet,
     gamma: float,
     gae_lambda: float,
@@ -51,8 +55,6 @@ def compute_gae_direct(
     Batches current + next state value predictions into a single forward pass.
     """
     B, T = data.shape
-    adv_key = loss_module.tensor_keys.advantage
-    vt_key = loss_module.tensor_keys.value_target
 
     with torch.no_grad():
         # Extract raw observation tensors (B, T, ...)
@@ -86,13 +88,12 @@ def compute_gae_direct(
             last_gae = delta[:, t] + gamma * gae_lambda * not_done * last_gae
             advantages[:, t] = last_gae
 
-    data.set(adv_key, advantages)
-    data.set(vt_key, advantages + values)
+    data.set(_ADV_KEY, advantages)
+    data.set(_VT_KEY, advantages + values)
 
 
 def optimize_ppo_epochs(
     data_flat: TensorDictBase,
-    loss_module: ClipPPOLoss,
     actor_net: SofaActorNet,
     critic_net: SofaCriticNet,
     optimizer: torch.optim.Optimizer,
@@ -106,10 +107,8 @@ def optimize_ppo_epochs(
 ) -> OptimizationStats:
     """Run PPO minibatch optimization with direct tensor ops.
 
-    Bypasses TorchRL's ClipPPOLoss in the inner loop to avoid TensorDict
-    overhead, and calls the shared encoder once per minibatch (not twice as
-    TorchRL's loss module would).  The optimizer still owns the same deduplicated
-    parameter set produced by loss_module.parameters().
+    Calls the shared encoder once per minibatch (not twice as separate
+    actor/critic forward passes would).
     """
     N = data_flat.shape[0]
 
@@ -119,9 +118,9 @@ def optimize_ppo_epochs(
     pose = data_flat["observation", "pose"]
     prog = data_flat["observation", "progress"]
     action = data_flat["action"]
-    old_log_prob = data_flat[loss_module.tensor_keys.sample_log_prob]
-    advantage = data_flat[loss_module.tensor_keys.advantage]
-    value_target = data_flat[loss_module.tensor_keys.value_target]
+    old_log_prob = data_flat[_SAMPLE_LOG_PROB_KEY]
+    advantage = data_flat[_ADV_KEY]
+    value_target = data_flat[_VT_KEY]
 
     encoder = actor_net.encoder
     actor_head = actor_net.head
@@ -171,7 +170,8 @@ def optimize_ppo_epochs(
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                loss_module.parameters(), max_grad_norm
+                itertools.chain(actor_net.parameters(), critic_net.head.parameters()),
+                max_grad_norm,
             ).item()
             optimizer.step()
             last_stats = OptimizationStats(

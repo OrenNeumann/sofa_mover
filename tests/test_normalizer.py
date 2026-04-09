@@ -286,14 +286,12 @@ class TestStateAndIntegration:
         training_stack.normalizer.freeze = True
         compute_gae_direct(
             data,
-            training_stack.loss_module,
             training_stack.critic_net,
             config.gamma,
             config.gae_lambda,
         )
         optimization_stats = optimize_ppo_epochs(
             data.reshape(-1),
-            training_stack.loss_module,
             training_stack.actor_net,
             training_stack.critic_net,
             training_stack.optimizer,

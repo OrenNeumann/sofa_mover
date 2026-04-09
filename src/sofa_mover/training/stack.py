@@ -1,13 +1,12 @@
 """Training stack construction."""
 
+import itertools
 from dataclasses import dataclass
 
 import torch
 from tensordict.nn import TensorDictModule
 from torchrl.collectors import Collector
 from torchrl.modules import OneHotCategorical, ProbabilisticActor, ValueOperator
-from torchrl.objectives import ClipPPOLoss
-from torchrl.objectives.value import GAE
 
 from sofa_mover.env import SofaEnv, make_sofa_env
 from sofa_mover.training.normalizer import Normalizer
@@ -30,7 +29,6 @@ class TrainingStack:
     critic_net: SofaCriticNet
     actor: ProbabilisticActor
     critic: ValueOperator
-    loss_module: ClipPPOLoss
     optimizer: torch.optim.Optimizer
     lr_scheduler: torch.optim.lr_scheduler.LinearLR
     collector: Collector
@@ -93,24 +91,14 @@ def build_training_stack(
         ],
     )
 
-    # --- PPO Loss ---
-    loss_module = ClipPPOLoss(
-        actor_network=actor,
-        critic_network=critic,
-        clip_epsilon=config.clip_epsilon,
-        entropy_bonus=True,
-        entropy_coeff=config.entropy_coeff,
-        critic_coeff=config.critic_coeff,
-    )
-    loss_module.make_value_estimator(
-        GAE,
-        gamma=config.gamma,
-        lmbda=config.gae_lambda,
-        value_network=critic,
-    )
-
     # --- Optimizer + LR schedule ---
-    optimizer = torch.optim.Adam(loss_module.parameters(), lr=config.lr, fused=True)
+    # actor_net.parameters() covers encoder + actor head;
+    # critic_net.head covers the critic-only head (encoder is shared).
+    optimizer = torch.optim.Adam(
+        itertools.chain(actor_net.parameters(), critic_net.head.parameters()),
+        lr=config.lr,
+        fused=True,
+    )
     total_batches = config.total_frames // (num_envs * config.rollout_length)
     lr_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
@@ -135,7 +123,6 @@ def build_training_stack(
         critic_net=critic_net,
         actor=actor,
         critic=critic,
-        loss_module=loss_module,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         collector=collector,

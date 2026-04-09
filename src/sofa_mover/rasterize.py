@@ -89,32 +89,30 @@ class Rasterizer:
         geometry: CorridorGeometry,
         sofa_config: GridConfig = SOFA_CONFIG,
         device: torch.device = torch.device("cuda"),
+        x_grid: Tensor | None = None,
+        y_grid: Tensor | None = None,
     ) -> None:
         self.geometry = geometry
         self.sofa_config = sofa_config
 
-        half = sofa_config.world_size / 2
-        H = sofa_config.grid_size
-        coords = torch.linspace(-half, half, H, device=device)
-        y_grid, x_grid = torch.meshgrid(coords, coords, indexing="ij")
-        self._x_grid: Tensor = x_grid
-        self._y_grid: Tensor = y_grid
-        self._rect_bounds: Tensor = geometry.to_tensor(device)
+        if x_grid is not None and y_grid is not None:
+            self._x_grid: Tensor = x_grid
+            self._y_grid: Tensor = y_grid
+        else:
+            half = sofa_config.world_size / 2
+            H = sofa_config.grid_size
+            coords = torch.linspace(-half, half, H, device=device)
+            y_default, x_default = torch.meshgrid(coords, coords, indexing="ij")
+            self._x_grid = x_default
+            self._y_grid = y_default
+
+        self._rect_bounds: Tensor = geometry.to_tensor(self._x_grid.device)
         self._corridor_mask_fn = torch.compile(_analytical_corridor_mask)
         self._swept_mask_fn = torch.compile(_analytical_swept_mask)
 
     @property
     def device(self) -> torch.device:
         return self._x_grid.device
-
-    def set_grids(self, x_grid: Tensor, y_grid: Tensor) -> None:
-        """Replace the internal coordinate grids (e.g. with a cropped subset).
-
-        All subsequent corridor_mask / swept_mask calls will operate on the
-        new grids and return tensors of the corresponding spatial size.
-        """
-        self._x_grid = x_grid
-        self._y_grid = y_grid
 
     def corridor_mask(self, pose: Pose) -> Float[Tensor, "B 1 Hs Ws"]:
         """Compute corridor mask on the sofa grid for a batch of corridor poses.
