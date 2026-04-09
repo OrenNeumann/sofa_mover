@@ -302,11 +302,9 @@ class TestObsModes:
         td = env.reset()
         obs = td["observation", "sofa_view"]
         assert obs.shape[1] == 1
-        # Downscaled: each dim halved from crop
-        crop_h = env._crop_y.stop - env._crop_y.start
-        crop_w = env._crop_x.stop - env._crop_x.start
-        assert obs.shape[2] == crop_h // 2
-        assert obs.shape[3] == crop_w // 2
+        # Downscaled: each dim halved from sofa grid
+        assert obs.shape[2] == env._sofa.shape[2] // 2
+        assert obs.shape[3] == env._sofa.shape[3] // 2
 
     def test_boundary_mode(self) -> None:
         cfg = _test_cfg(observation_type="boundary", boundary_rays=64)

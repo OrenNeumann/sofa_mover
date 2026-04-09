@@ -10,7 +10,6 @@ from torchrl.data.tensor_specs import Bounded, Composite, OneHot, Unbounded
 from torchrl.envs import EnvBase
 
 from sofa_mover.corridor import Pose, make_l_corridor
-from sofa_mover.erosion import erode
 from sofa_mover.rasterize import Rasterizer
 from sofa_mover.training.config import DEVICE, SofaEnvConfig
 
@@ -34,7 +33,7 @@ def _sofa_com(
     y_grid: Float[Tensor, "H W"],
 ) -> Float[Tensor, "B 2"]:
     """Compute center of mass of sofa grids."""
-    mass = sofa[:, 0]  # (B, H, H)
+    mass = sofa[:, 0].float()  # (B, H, W) # TODO: is this bool or float?
     total = mass.sum(dim=(-2, -1)).clamp(min=1e-8)  # (B,)
     cx = (mass * x_grid).sum(dim=(-2, -1)) / total
     cy = (mass * y_grid).sum(dim=(-2, -1)) / total
@@ -97,38 +96,46 @@ class SofaEnv(EnvBase):
             dim=-1,
         )  # (27, 3)
 
-        # World-coordinate grids for COM calculation
-        H = cfg.sofa_config.grid_size
-        half = cfg.sofa_config.world_size / 2
-        coords = torch.linspace(-half, half, H, device=device)
-        y_grid, x_grid = torch.meshgrid(coords, coords, indexing="ij")
-
         # Goal point in corridor-centric coords (constant)
         self.goal_corridor: torch.Tensor = torch.tensor(cfg.goal_point, device=device)
 
-        # Initial area and goal distance (single mask computation)
-        self.cell_area = (cfg.sofa_config.world_size / H) ** 2
+        # Build sofa coordinate grids directly in corridor coords.
+        # The sofa frame = corridor frame at t=0 (initial_pose = 0,0,0).
+        ppu = cfg.sofa_config.pixels_per_unit
+        grid_w = round(cfg.corridor_width * ppu)
+        grid_h = round(cfg.sofa_length * ppu)
+        self.cell_area = (1.0 / ppu) ** 2
+
+        hw = cfg.corridor_width / 2
+        front_y = cfg.start_y_max
+        back_y = front_y - cfg.sofa_length
+
+        x_coords = torch.linspace(-hw, hw, grid_w, device=device)
+        y_coords = torch.linspace(back_y, front_y, grid_h, device=device)
+        self.y_grid, self.x_grid = torch.meshgrid(y_coords, x_coords, indexing="ij")
+        self.rasterizer.set_grids(self.x_grid, self.y_grid)
+
+        # World-coordinate extent of the sofa grid (for rendering)
+        self.sofa_extent: tuple[float, float, float, float] = (
+            -hw,
+            hw,
+            back_y,
+            front_y,
+        )
+
         init_pose = torch.tensor([list(cfg.initial_pose)], device=device)
-        # Clip initial sofa to the start region of the vertical leg
-        self._start_mask = self._compute_start_mask(init_pose, cfg, device)
-        init_mask = self.rasterizer.corridor_mask(init_pose) * self._start_mask
-
-        # Compute crop bounding box from initial sofa (sofa can only shrink)
-        self._crop_y, self._crop_x = self._bbox(init_mask)
-
-        # Crop grids for COM calculation
-        self.x_grid: torch.Tensor = x_grid[self._crop_y, self._crop_x]
-        self.y_grid: torch.Tensor = y_grid[self._crop_y, self._crop_x]
-
-        init_cropped = self._crop(init_mask)
-        self.initial_area = init_mask.sum().item() * self.cell_area
-        init_com = _sofa_com(init_cropped, self.x_grid, self.y_grid)
+        init_sofa = self.rasterizer.corridor_mask(
+            init_pose
+        )  # all True by construction (TODO: check)
+        self.initial_area = init_sofa.sum().item() * self.cell_area
+        init_com = _sofa_com(init_sofa, self.x_grid, self.y_grid)
         init_goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, init_pose)
         self.initial_goal_dist = (init_com - init_goal_sofa).norm(dim=-1).item()
 
-        # Internal state — cropped to bbox
-        crop_h, crop_w = init_cropped.shape[2], init_cropped.shape[3]
-        self._sofa = torch.ones(num_envs, 1, crop_h, crop_w, device=device)
+        # Internal state
+        self._sofa = torch.ones(
+            num_envs, 1, grid_h, grid_w, dtype=torch.bool, device=device
+        )
         self._pose = torch.zeros(num_envs, 3, device=device)
         self._step_count = torch.zeros(num_envs, 1, dtype=torch.int64, device=device)
 
@@ -139,7 +146,7 @@ class SofaEnv(EnvBase):
         # Boundary ray-casting setup (if enabled)
         if cfg.observation_type == "boundary":
             self._boundary = BoundaryExtractor(
-                cfg.boundary_rays, init_cropped[0, 0], device
+                cfg.boundary_rays, init_sofa[0, 0], device
             )
 
         self._make_specs()
@@ -173,8 +180,8 @@ class SofaEnv(EnvBase):
                 shape=(
                     B,
                     1,
-                    (self._crop_y.stop - self._crop_y.start) // self.cfg.obs_downscale,
-                    (self._crop_x.stop - self._crop_x.start) // self.cfg.obs_downscale,
+                    self._sofa.shape[2] // self.cfg.obs_downscale,
+                    self._sofa.shape[3] // self.cfg.obs_downscale,
                 ),
                 dtype=torch.uint8,
                 device=self.device,
@@ -216,37 +223,6 @@ class SofaEnv(EnvBase):
     def shaping_scale(self) -> float:
         return max(0.0, 1.0 - self.steps_count / self._anneal_end)
 
-    @staticmethod
-    def _compute_start_mask(
-        pose: Pose,
-        cfg: SofaEnvConfig,
-        device: torch.device,
-    ) -> Float[Tensor, "1 1 H W"]:
-        """Compute a mask clipping sofa pixels to cy <= start_y_max in corridor coords."""
-        H = cfg.sofa_config.grid_size
-        half = cfg.sofa_config.world_size / 2
-        coords = torch.linspace(-half, half, H, device=device)
-        y_grid, x_grid = torch.meshgrid(coords, coords, indexing="ij")
-
-        tx, ty, theta = pose[0, 0], pose[0, 1], pose[0, 2]
-        cos_t, sin_t = torch.cos(theta), torch.sin(theta)
-        dx = x_grid - tx
-        dy = y_grid - ty
-        cy = -sin_t * dx + cos_t * dy
-        return (cy <= cfg.start_y_max).float().unsqueeze(0).unsqueeze(0)
-
-    @staticmethod
-    def _bbox(mask: Float[Tensor, "1 1 H W"]) -> tuple[slice, slice]:
-        """Bounding box (y_slice, x_slice) of nonzero pixels."""
-        nz = mask[0, 0].nonzero(as_tuple=True)
-        y0, y1 = int(nz[0].min()), int(nz[0].max()) + 1
-        x0, x1 = int(nz[1].min()), int(nz[1].max()) + 1
-        return slice(y0, y1), slice(x0, x1)
-
-    def _crop(self, t: torch.Tensor) -> torch.Tensor:
-        """Crop a (B, C, H, W) tensor to the sofa bounding box."""
-        return t[:, :, self._crop_y, self._crop_x]
-
     def _reset(self, tensordict: TensorDictBase) -> TensorDictBase:
         B = self.num_envs
         device = self.device
@@ -266,11 +242,11 @@ class SofaEnv(EnvBase):
                 .contiguous()
             )
 
-            H = self.cfg.sofa_config.grid_size
-            fresh_sofa = torch.ones(n_reset, 1, H, H, device=device)
-            initial_mask = self.rasterizer.corridor_mask(initial_pose)
-            initial_mask = initial_mask * self._start_mask
-            fresh_sofa = self._crop(erode(fresh_sofa, initial_mask))
+            h, w = self._sofa.shape[2], self._sofa.shape[3]
+            fresh_sofa = torch.ones(n_reset, 1, h, w, dtype=torch.bool, device=device)
+            # TODO: At the initial pose all pixels are inside the corridor by
+            # construction, so this erode is effectively a no-op. replace with assert.
+            fresh_sofa = fresh_sofa & self.rasterizer.corridor_mask(initial_pose)
 
             self._sofa[reset_mask] = fresh_sofa
             self._pose[reset_mask] = initial_pose
@@ -330,16 +306,21 @@ class SofaEnv(EnvBase):
         pose_next = pose + delta
 
         # Area before erosion
-        area_before = self._sofa.flatten(1).sum(dim=1) * self.cell_area  # (B,)
+        area_before = (
+            self._sofa.flatten(1).sum(dim=1, dtype=torch.float32) * self.cell_area
+        )  # (B,)
 
-        # Swept mask erosion (rasterizer works on full grid, crop result)
+        # Swept mask erosion (rasterizer already operates on the cropped grid)
         swept, _corridor_at_next = self.rasterizer.swept_mask(
             pose, pose_next, cfg.num_substeps
         )
-        new_sofa = erode(self._sofa, self._crop(swept))
+        # Erosion: sofa ∩ corridor removes pixels outside the corridor
+        new_sofa = self._sofa & swept
 
         # Area after erosion
-        area_after = new_sofa.flatten(1).sum(dim=1) * self.cell_area  # (B,)
+        area_after = (
+            new_sofa.flatten(1).sum(dim=1, dtype=torch.float32) * self.cell_area
+        )  # (B,)
         # Goal check: sofa COM close to goal point
         com = _sofa_com(new_sofa, self.x_grid, self.y_grid)  # (B, 2)
         goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, pose_next)  # (B, 2)

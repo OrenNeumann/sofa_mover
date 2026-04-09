@@ -44,7 +44,7 @@ def test_identity_pose_center_is_passable(
     center = sofa_config.grid_size // 2
     # Check a pixel slightly inside the vertical leg: world ~(-0.3, -0.3)
     offset = int(0.3 * sofa_config.pixels_per_unit)
-    assert mask[0, 0, center - offset, center - offset].item() == 1.0
+    assert mask[0, 0, center - offset, center - offset].item() is True
 
 
 def test_translation_shifts_mask(rasterizer: Rasterizer) -> None:

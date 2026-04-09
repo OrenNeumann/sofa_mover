@@ -6,7 +6,6 @@ from pathlib import Path
 import torch
 
 from sofa_mover.corridor import make_l_corridor
-from sofa_mover.erosion import erode
 from sofa_mover.rasterize import Rasterizer
 from sofa_mover.training.config import DEVICE, GridConfig, SOFA_CONFIG
 from sofa_mover.visualization.render import (
@@ -67,21 +66,24 @@ def main(
     for step, pose_vals in enumerate(trajectory):
         pose = torch.tensor([pose_vals], device=device)
         mask = rasterizer.corridor_mask(pose)
-        sofa = erode(sofa, mask)
+        sofa = sofa & mask
+        cell_area = (sofa_config.world_size / sofa_config.grid_size) ** 2
         frames.append(
             compute_frame_data(
                 step,
                 (pose_vals[0], pose_vals[1], pose_vals[2]),
                 sofa,
                 mask,
-                sofa_config,
+                cell_area,
             )
         )
 
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
     output_path = output_dir / "sofa_erosion.gif"
-    written = render_trajectory(frames, sofa_config, output_path, fps=10)
+    half = sofa_config.world_size / 2
+    sofa_extent = (-half, half, -half, half)
+    written = render_trajectory(frames, output_path, sofa_extent=sofa_extent, fps=10)
     print(f"Saved {written}")
 
 

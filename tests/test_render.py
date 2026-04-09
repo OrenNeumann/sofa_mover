@@ -27,8 +27,9 @@ class TestComputeFrameData:
         height = sofa_config.grid_size
         sofa = torch.ones(1, 1, height, height, device=device)
         mask = torch.ones(1, 1, height, height, device=device)
+        cell_area = (sofa_config.world_size / sofa_config.grid_size) ** 2
 
-        frame = compute_frame_data(0, (0.0, 0.0, 0.0), sofa, mask, sofa_config)
+        frame = compute_frame_data(0, (0.0, 0.0, 0.0), sofa, mask, cell_area)
 
         assert frame.step == 0
         assert frame.pose == (0.0, 0.0, 0.0)
@@ -44,8 +45,9 @@ class TestComputeFrameData:
         sofa = torch.zeros(1, 1, height, height, device=device)
         sofa[:, :, : height // 2, :] = 1.0
         mask = torch.ones(1, 1, height, height, device=device)
+        cell_area = (sofa_config.world_size / sofa_config.grid_size) ** 2
 
-        frame = compute_frame_data(5, (1.0, 2.0, 0.5), sofa, mask, sofa_config)
+        frame = compute_frame_data(5, (1.0, 2.0, 0.5), sofa, mask, cell_area)
 
         assert frame.area == pytest.approx(sofa_config.world_size**2 / 2, rel=1e-2)
         assert frame.step == 5
@@ -228,7 +230,9 @@ class TestRenderTrajectory:
         ]
 
         output = tmp_path / "test_video.gif"
-        written = render_trajectory(frames, sofa_config, output, fps=5)
+        half = sofa_config.world_size / 2
+        sofa_extent = (-half, half, -half, half)
+        written = render_trajectory(frames, output, sofa_extent=sofa_extent, fps=5)
 
         assert written.exists()
         assert written.stat().st_size > 0

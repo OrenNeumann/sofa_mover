@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 
 from sofa_mover.corridor import make_l_corridor
 from sofa_mover.rasterize import Rasterizer
-from sofa_mover.erosion import erode
 from sofa_mover.training.config import DEVICE, GridConfig, SOFA_CONFIG
 
 
@@ -122,7 +121,7 @@ def main(
 
     for i, pose_vals in enumerate(trajectory):
         mask = rasterizer.corridor_mask(torch.tensor([pose_vals], device=device))
-        sofa = erode(sofa, mask)
+        sofa = sofa & mask
         area_pixels = sofa.sum().item()
         area_world = area_pixels * (sofa_config.world_size / sofa_config.grid_size) ** 2
 

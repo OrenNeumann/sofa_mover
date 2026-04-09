@@ -289,11 +289,16 @@ class TestStateAndIntegration:
         optimization_stats = optimize_ppo_epochs(
             data.reshape(-1),
             training_stack.loss_module,
+            training_stack.actor_net,
+            training_stack.critic_net,
             training_stack.optimizer,
             config.num_epochs,
             config.minibatch_size,
             config.max_grad_norm,
             config.device,
+            config.clip_epsilon,
+            config.entropy_coeff,
+            config.critic_coeff,
         )
         training_stack.normalizer.freeze = False
 

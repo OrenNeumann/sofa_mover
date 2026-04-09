@@ -8,7 +8,7 @@ from torchrl.modules import OneHotCategorical, ProbabilisticActor
 
 from sofa_mover.env import make_sofa_env
 from sofa_mover.networks import SofaActorNet, SofaBoundaryEncoder, SofaEncoder
-from sofa_mover.training.config import DEVICE, SofaEnvConfig, TrainingConfig
+from sofa_mover.training.config import DEVICE, TrainingConfig
 from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.visualization.render import (
     FrameData,
@@ -31,7 +31,7 @@ def evaluate(
         weights_only=False,
     )
     training_config: TrainingConfig = checkpoint["config"]
-    cfg: SofaEnvConfig = training_config.env
+    cfg = training_config.env
     device = training_config.device if device is None else device
 
     env = make_sofa_env(
@@ -72,7 +72,6 @@ def evaluate(
     actor.load_state_dict(checkpoint["actor"])
     actor.eval()
 
-    grid_size = cfg.sofa_config.grid_size
     frames: list[FrameData] = []
 
     def _collect_frame(step: int) -> None:
@@ -81,12 +80,9 @@ def evaluate(
             env._pose[0, 1].item(),
             env._pose[0, 2].item(),
         )
-        full_sofa = torch.zeros(1, 1, grid_size, grid_size, device=device)
-        full_sofa[:, :, env._crop_y, env._crop_x] = env._sofa.float()
-        corridor_full = env.rasterizer.corridor_mask(env._pose)
-        frames.append(
-            compute_frame_data(step, pose, full_sofa, corridor_full, cfg.sofa_config)
-        )
+        sofa = env._sofa[:1].float()
+        corridor = env.rasterizer.corridor_mask(env._pose[:1])
+        frames.append(compute_frame_data(step, pose, sofa, corridor, env.cell_area))
 
     with torch.no_grad():
         td = env.reset()
@@ -109,7 +105,7 @@ def evaluate(
     out = Path(output_path)
     out.parent.mkdir(exist_ok=True)
     result = render_trajectory(
-        frames, cfg.sofa_config, out, fps=10, corridor_width=cfg.corridor_width
+        frames, out, sofa_extent=env.sofa_extent, corridor_width=cfg.corridor_width
     )
     print(f"Saved {len(frames)}-frame trajectory to {result}")
     print(f"Final area: {frames[-1].area:.4f}")

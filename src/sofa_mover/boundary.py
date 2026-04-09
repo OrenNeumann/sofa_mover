@@ -40,6 +40,7 @@ class BoundaryExtractor:
 
     def __call__(self, sofa: Float[Tensor, "B 1 H W"]) -> Float[Tensor, "B N"]:
         """Extract radial boundary profile, normalized to [0, 1]."""
+        sofa = sofa.float()  # grid_sample requires float input
         grid = self._ray_grid.expand(sofa.shape[0], -1, -1, -1)
         # fmt: off
         samples = F.grid_sample(

@@ -39,8 +39,10 @@ class SofaEnvConfig:
     lambda_erosion: float = 0.1
     lambda_progress: float = 1.0
     min_area_fraction: float = 0.05
-    initial_pose: tuple[float, float, float] = (0.0, 2.0, 0.0)
-    # Max y in corridor coords for the initial sofa region.
+    initial_pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Length of the sofa in world units along the corridor.
+    sofa_length: float = 2.4
+    # Max y in corridor coords for the front edge of the initial sofa.
     start_y_max: float = -1.5
     # Goal point in corridor-centric coords (middle of exit end)
     goal_point: tuple[float, float] = (2.0, 0.0)

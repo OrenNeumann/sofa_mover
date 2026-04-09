@@ -16,7 +16,6 @@ from torch import Tensor
 from tqdm import TqdmExperimentalWarning
 from tqdm.rich import tqdm
 
-from sofa_mover.training.config import GridConfig
 
 warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
 matplotlib.use("Agg")
@@ -49,10 +48,9 @@ def compute_frame_data(
     pose: tuple[float, float, float],
     sofa: Float[Tensor, "1 1 H W"],
     corridor_mask: Float[Tensor, "1 1 H W"],
-    sofa_config: GridConfig,
+    cell_area: float,
 ) -> FrameData:
     """Package tensor data into a FrameData for rendering."""
-    cell_area = (sofa_config.world_size / sofa_config.grid_size) ** 2
     area = sofa.sum().item() * cell_area
     return FrameData(
         step=step,
@@ -215,11 +213,6 @@ def sample_sofa_in_corridor_frame(
 # ---------------------------------------------------------------------------
 
 
-def _default_sofa_extent(sofa_config: GridConfig) -> Extent:
-    half = sofa_config.world_size / 2
-    return (-half, half, -half, half)
-
-
 def _default_left_pad_pixels(shape: tuple[int, int]) -> int:
     return max(4, int(round(min(shape) * LEFT_PAD_FRACTION)))
 
@@ -353,17 +346,14 @@ def _write_streaming_gif(
 
 def render_trajectory(
     frames: Sequence[FrameData],
-    sofa_config: GridConfig,
     output_path: Path,
+    sofa_extent: Extent,
     fps: int = 10,
-    extent: Extent | None = None,
     corridor_width: float = 1.0,
 ) -> Path:
     """Render a sequence of frames into an animated gif."""
     if len(frames) == 0:
         raise ValueError("Cannot render an empty trajectory.")
-
-    sofa_extent = extent if extent is not None else _default_sofa_extent(sofa_config)
     render_shape = (frames[0].sofa.shape[0], frames[0].sofa.shape[1])
     left_pad_pixels = _default_left_pad_pixels(render_shape)
     left_extent = expand_extent(sofa_extent, render_shape, left_pad_pixels)

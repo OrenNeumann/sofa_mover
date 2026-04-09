@@ -1,5 +1,5 @@
 import torch
-from jaxtyping import Float
+from jaxtyping import Float, Bool
 from torch import Tensor
 
 from sofa_mover.corridor import CorridorGeometry, Pose
@@ -11,7 +11,7 @@ def _analytical_corridor_mask(
     x_grid: Float[Tensor, "H W"],
     y_grid: Float[Tensor, "H W"],
     rect_bounds: Float[Tensor, "R 4"],
-) -> Float[Tensor, "B 1 H W"]:
+) -> Bool[Tensor, "B 1 H W"]:
     """Compute corridor mask analytically via per-pixel rectangle membership.
 
     For each sofa pixel, transforms to corridor-local frame and checks if the
@@ -41,7 +41,7 @@ def _analytical_corridor_mask(
     )  # (R, B, H, W)
     in_any = in_rect.any(dim=0)  # (B, H, W)
 
-    return in_any.float().unsqueeze(1)  # (B, 1, H, W)
+    return in_any.unsqueeze(1)
 
 
 def _analytical_swept_mask(
@@ -71,7 +71,7 @@ def _analytical_swept_mask(
     masks_flat = _analytical_corridor_mask(all_poses_flat, x_grid, y_grid, rect_bounds)
     masks = masks_flat.reshape(num_substeps, B, 1, H, W)
 
-    swept, _ = masks.min(dim=0)
+    swept = masks.all(dim=0)  # pixel kept iff inside corridor at every substep
     corridor_at_next = masks[-1]
     return swept, corridor_at_next
 
@@ -106,6 +106,15 @@ class Rasterizer:
     @property
     def device(self) -> torch.device:
         return self._x_grid.device
+
+    def set_grids(self, x_grid: Tensor, y_grid: Tensor) -> None:
+        """Replace the internal coordinate grids (e.g. with a cropped subset).
+
+        All subsequent corridor_mask / swept_mask calls will operate on the
+        new grids and return tensors of the corresponding spatial size.
+        """
+        self._x_grid = x_grid
+        self._y_grid = y_grid
 
     def corridor_mask(self, pose: Pose) -> Float[Tensor, "B 1 Hs Ws"]:
         """Compute corridor mask on the sofa grid for a batch of corridor poses.

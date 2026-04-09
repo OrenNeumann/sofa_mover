@@ -64,11 +64,16 @@ for data in stack.collector:
     optimization_stats = optimize_ppo_epochs(
         data_flat,
         stack.loss_module,
+        stack.actor_net,
+        stack.critic_net,
         stack.optimizer,
         config.num_epochs,
         config.minibatch_size,
         config.max_grad_norm,
         config.device,
+        config.clip_epsilon,
+        config.entropy_coeff,
+        config.critic_coeff,
     )
     normalizer.freeze = False
     stack.lr_scheduler.step()

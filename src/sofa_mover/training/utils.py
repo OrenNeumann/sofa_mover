@@ -4,11 +4,13 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDictBase
+from torchrl.modules import OneHotCategorical
 from torchrl.objectives import ClipPPOLoss
 
 from sofa_mover.env import SofaEnv
-from sofa_mover.networks import SofaCriticNet
+from sofa_mover.networks import SofaActorNet, SofaCriticNet
 from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.visualization.render import build_composite
 
@@ -106,33 +108,81 @@ def normalize_rewards_inplace(
 def optimize_ppo_epochs(
     data_flat: TensorDictBase,
     loss_module: ClipPPOLoss,
+    actor_net: SofaActorNet,
+    critic_net: SofaCriticNet,
     optimizer: torch.optim.Optimizer,
     num_epochs: int,
     minibatch_size: int,
     max_grad_norm: float,
     device: torch.device,
+    clip_epsilon: float,
+    entropy_coeff: float,
+    critic_coeff: float,
 ) -> OptimizationStats:
-    """Run PPO minibatch optimization."""
-    total_samples = data_flat.shape[0]
+    """Run PPO minibatch optimization with direct tensor ops.
 
-    # PPO epochs
+    Bypasses TorchRL's ClipPPOLoss in the inner loop to avoid TensorDict
+    overhead, and calls the shared encoder once per minibatch (not twice as
+    TorchRL's loss module would).  The optimizer still owns the same deduplicated
+    parameter set produced by loss_module.parameters().
+    """
+    N = data_flat.shape[0]
+
+    # Extract all relevant tensors from the TensorDict once (outside the epoch
+    # loop) to avoid repeated dict lookups per minibatch.
+    sv = data_flat["observation", "sofa_view"]
+    pose = data_flat["observation", "pose"]
+    prog = data_flat["observation", "progress"]
+    action = data_flat["action"]
+    old_log_prob = data_flat[loss_module.tensor_keys.sample_log_prob]
+    advantage = data_flat[loss_module.tensor_keys.advantage]
+    value_target = data_flat[loss_module.tensor_keys.value_target]
+
+    encoder = actor_net.encoder
+    actor_head = actor_net.head
+    critic_head = critic_net.head
+
     grad_norm = 0.0
-    last_loss_td: TensorDictBase | None = None
-    for _epoch in range(num_epochs):
-        # Shuffle once and slice contiguously (much faster than random indexing
-        # into TensorDicts, which gathers every nested tensor individually).
-        perm = torch.randperm(total_samples, device=device)
-        shuffled = data_flat[perm]
-        for mb_start in range(0, total_samples, minibatch_size):
-            mb_end = min(mb_start + minibatch_size, total_samples)
-            minibatch = shuffled[mb_start:mb_end]
+    last_losses: tuple[float, float, float] | None = None
 
-            loss_td = loss_module(minibatch)
-            loss = (
-                loss_td["loss_objective"]
-                + loss_td["loss_critic"]
-                + loss_td["loss_entropy"]
+    for _epoch in range(num_epochs):
+        # Shuffle all tensors together with a single permutation.
+        perm = torch.randperm(N, device=device)
+        sv_s = sv[perm]
+        pose_s = pose[perm]
+        prog_s = prog[perm]
+        act_s = action[perm]
+        olp_s = old_log_prob[perm]
+        adv_s = advantage[perm]
+        vt_s = value_target[perm]
+
+        for mb_start in range(0, N, minibatch_size):
+            mb_end = min(mb_start + minibatch_size, N)
+
+            # Encoder called ONCE — shared features for actor and critic heads.
+            features = encoder(
+                sv_s[mb_start:mb_end],
+                pose_s[mb_start:mb_end],
+                prog_s[mb_start:mb_end],
             )
+
+            logits = actor_head(features)
+            dist = OneHotCategorical(logits=logits)
+            new_log_prob = dist.log_prob(act_s[mb_start:mb_end])
+            entropy = dist.entropy()
+
+            values = critic_head(features).squeeze(-1)
+
+            ratio = torch.exp(new_log_prob - olp_s[mb_start:mb_end].squeeze(-1))
+            adv_mb = adv_s[mb_start:mb_end].squeeze(-1)
+            surr1 = ratio * adv_mb
+            surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * adv_mb
+            loss_pol = -torch.min(surr1, surr2).mean()
+            loss_crit = critic_coeff * F.mse_loss(
+                values, vt_s[mb_start:mb_end].squeeze(-1)
+            )
+            loss_ent = -entropy_coeff * entropy.mean()
+            loss = loss_pol + loss_crit + loss_ent
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -140,15 +190,16 @@ def optimize_ppo_epochs(
                 loss_module.parameters(), max_grad_norm
             ).item()
             optimizer.step()
-            last_loss_td = loss_td
+            # TODO: use named tuple here
+            last_losses = (loss_pol.item(), loss_crit.item(), loss_ent.item())
 
-    if last_loss_td is None:
+    if last_losses is None:
         raise RuntimeError("PPO optimization ran with zero minibatches.")
 
     return OptimizationStats(
-        loss_policy=last_loss_td["loss_objective"].item(),
-        loss_critic=last_loss_td["loss_critic"].item(),
-        loss_entropy=last_loss_td["loss_entropy"].item(),
+        loss_policy=last_losses[0],
+        loss_critic=last_losses[1],
+        loss_entropy=last_losses[2],
         grad_norm=grad_norm,
     )
 
@@ -221,11 +272,8 @@ def maybe_build_episode_composite(
 
     # Reconstruct corridor mask from pose for visualization
     pose_td = data_flat["next", "observation", "pose"][last_done_idx].unsqueeze(0)
-    corridor_full = env.rasterizer.corridor_mask(pose_td)
+    corridor_mask = env.rasterizer.corridor_mask(pose_td)  # already cropped bool
     mask_img = (
-        env._downscale_obs(env._crop(corridor_full).to(torch.uint8))[0, 0]
-        .float()
-        .cpu()
-        .numpy()
+        env._downscale_obs(corridor_mask.to(torch.uint8))[0, 0].float().cpu().numpy()
     )
     return build_composite(sofa_img, mask_img)
