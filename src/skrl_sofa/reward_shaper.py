@@ -58,6 +58,10 @@ class RunningReturnRewardShaper:
                 if self._current_done is not None:
                     self._returns[self._current_done] = 0.0
 
+        return self.normalize(rewards)
+
+    def normalize(self, rewards: torch.Tensor) -> torch.Tensor:
+        reward_flat = rewards.squeeze(-1)
         ret_std = self._ret_rms.var.sqrt().clamp(min=self.epsilon)
         normalized = (reward_flat / ret_std).clamp(-self.clip, self.clip)
         return normalized.unsqueeze(-1)

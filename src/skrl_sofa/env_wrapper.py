@@ -28,6 +28,7 @@ _INFO_METRIC_KEYS = (
     "reward_erosion",
     "reward_progress",
     "reward_terminal",
+    "truncated",
 )
 
 
@@ -127,6 +128,7 @@ class SkrlSofaEnv(Wrapper):
         done = next_td["done"].squeeze(-1)  # (B,)
 
         obs = self._flat_obs(next_td["observation"])
+        reset_obs = obs
 
         # Expose per-env episode metrics for the trainer to log.
         info: dict[str, Any] = {key: next_td[key] for key in _INFO_METRIC_KEYS}
@@ -138,13 +140,16 @@ class SkrlSofaEnv(Wrapper):
         # for every step where any env finished — ~14ms/step of wasted work.
         if done.any():
             inner = self._inner
+            reset_obs = obs.clone()
             inner._sofa[done] = self._fresh_sofa_row
             inner._pose[done] = self._fresh_pose_row
             inner._step_count[done] = 0
             inner._episode_total_angle[done] = 0.0
             inner._episode_total_distance[done] = 0.0
             inner._goal_dist[done] = self._fresh_goal_dist
-            obs[done] = self._fresh_obs_row
+            reset_obs[done] = self._fresh_obs_row
+
+        info["reset_obs"] = reset_obs
 
         return obs, reward, terminated, truncated, info
 

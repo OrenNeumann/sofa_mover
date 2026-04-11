@@ -6,6 +6,16 @@
 uv run python -m sofa_mover.training.train
 ```
 
+For the skrl pipeline:
+
+```bash
+uv run python -m skrl_sofa.train
+```
+
+This writes checkpoints to `output_skrl/` and, at the end of training, renders
+`agent_trajectory.gif`, using `best_policy.pt` when available and otherwise
+falling back to `final_policy.pt`.
+
 ## Visualization
 
 A trajectory GIF is generated automatically at the end of training. To visualize a trained model manually:

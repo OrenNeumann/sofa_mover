@@ -1,8 +1,9 @@
 """Manual skrl PPO training loop for the sofa moving problem.
 
 Mirrors `sofa_mover.training.train` (wandb logging, best-policy checkpoint,
-episode metrics) but uses `skrl`'s `PPO` agent + `RandomMemory` instead of the
-torchrl collector + bespoke optimizer.
+episode metrics, end-of-training trajectory rendering) but uses `skrl`'s
+`PPO` agent + `RandomMemory` instead of the torchrl collector + bespoke
+optimizer.
 
 Why a manual loop (Option B)?
     Option A would wrap everything in a `SequentialTrainer` and attach a
@@ -40,6 +41,7 @@ from sofa_mover.training.normalizer import Normalizer
 
 from skrl_sofa.agent import build_ppo_agent
 from skrl_sofa.config import SkrlTrainingConfig
+from skrl_sofa.evaluate import evaluate
 from skrl_sofa.env_wrapper import SkrlSofaEnv
 from skrl_sofa.model import SharedSofaModel
 from skrl_sofa.reward_shaper import RunningReturnRewardShaper
@@ -77,9 +79,11 @@ def _aggregate_episode_metrics(
     ep_length = _gather("episode_length").float()
     ep_angle = _gather("episode_total_angle")
     ep_dist = _gather("episode_total_distance")
+    truncated = _gather("truncated").bool()
     return {
         "episode/area_at_goal": terminal_area.mean().item(),
         "episode/goal_rate": (terminal_area > 0).float().mean().item(),
+        "episode/truncation_rate": truncated.float().mean().item(),
         "episode/episode_length": ep_length.mean().item(),
         "episode/total_angle": ep_angle.mean().item(),
         "episode/total_distance": ep_dist.mean().item(),
@@ -176,6 +180,7 @@ def main() -> None:
 
     step_infos: list[dict[str, torch.Tensor]] = []
     raw_rewards: list[torch.Tensor] = []
+    normalized_rewards: list[torch.Tensor] = []
     rollout_t0 = time.perf_counter()
 
     for timestep in range(total_timesteps):
@@ -188,7 +193,19 @@ def main() -> None:
 
         next_obs, rewards, terminated, truncated, info = env.step(actions)
         raw_rewards.append(rewards.detach())
-        step_infos.append(info)
+        step_infos.append(
+            {
+                "done": info["done"],
+                "terminal_area": info["terminal_area"],
+                "episode_length": info["episode_length"],
+                "episode_total_angle": info["episode_total_angle"],
+                "episode_total_distance": info["episode_total_distance"],
+                "reward_erosion": info["reward_erosion"],
+                "reward_progress": info["reward_progress"],
+                "reward_terminal": info["reward_terminal"],
+                "truncated": info["truncated"],
+            }
+        )
 
         # Shaper needs the per-env done mask for this step so it can zero the
         # running return at episode boundaries (skrl's shaper callback
@@ -216,8 +233,9 @@ def main() -> None:
         agent.post_interaction(timestep=timestep, timesteps=total_timesteps)
         normalizer.freeze = False
         reward_shaper.freeze = False
+        normalized_rewards.append(reward_shaper.normalize(rewards).detach())
 
-        obs = next_obs
+        obs = info["reset_obs"]
 
         # Rollout boundary: flush logging.
         if (timestep + 1) % rollout_length == 0:
@@ -231,6 +249,12 @@ def main() -> None:
                 "train/walltime": walltime,
                 "train/steps_per_second": total_steps / walltime,
                 "train/batch_fps": batch_fps,
+                "train/mean_reward_normalized": (
+                    torch.cat([reward.reshape(-1) for reward in normalized_rewards])
+                    .mean()
+                    .item()
+                ),
+                "reward/shaping_scale": env.inner.shaping_scale,
                 "train/lr": (
                     agent.scheduler.get_last_lr()[0]
                     if agent.scheduler is not None
@@ -247,6 +271,11 @@ def main() -> None:
                 log_payload["loss/critic"] = tracking["Loss / Value loss"][-1]
             if "Loss / Entropy loss" in tracking and tracking["Loss / Entropy loss"]:
                 log_payload["loss/entropy"] = tracking["Loss / Entropy loss"][-1]
+            grad_sq_sum = 0.0
+            for parameter in model.parameters():
+                if parameter.grad is not None:
+                    grad_sq_sum += parameter.grad.square().sum().item()
+            log_payload["train/grad_norm"] = grad_sq_sum**0.5
 
             ep_metrics = _aggregate_episode_metrics(step_infos)
             if ep_metrics is not None:
@@ -271,6 +300,7 @@ def main() -> None:
             batch_idx += 1
             step_infos = []
             raw_rewards = []
+            normalized_rewards = []
             rollout_t0 = time.perf_counter()
 
     pbar.close()
@@ -290,6 +320,13 @@ def main() -> None:
     )
     print(f"Training complete. Best area at goal: {best_area_at_goal:.4f}")
     print(f"Saved to {final_path}")
+    best_path = output_path / "best_policy.pt"
+    eval_path = best_path if best_path.exists() else final_path
+    evaluate(
+        checkpoint_path=str(eval_path),
+        output_path=str(output_path / "agent_trajectory.gif"),
+        device=config.device,
+    )
 
 
 if __name__ == "__main__":
