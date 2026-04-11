@@ -12,6 +12,7 @@ AGENTS.md
 .codex
 
 output/
+output_skrl/
 wandb/
 runs/
 docs/
