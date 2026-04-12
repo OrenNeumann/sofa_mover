@@ -427,8 +427,7 @@ def render_trajectory(
             rotate_image_counterclockwise(build_composite(right_sofa, right_corridor))
         )
         right_title.set_text(
-            f"Step {frame.step}: corridor frame, 90\u00b0 counterclockwise\n"
-            f"fixed final sofa, area={frames[-1].area:.3f}"
+            f"Step {frame.step}.\n" f"Sofa area = {frames[-1].area:.3f}"
         )
 
     gif_path = output_path.with_suffix(".gif")

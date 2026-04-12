@@ -41,6 +41,7 @@ def test_extract_episode_metrics_aggregates_done_episodes() -> None:
     assert metrics.n_done == 2
     # area_at_goal averages over ALL done episodes (0.8 + 0.0) / 2 = 0.4
     assert metrics.area_at_goal == pytest.approx(0.4)
+    assert metrics.best_area_at_goal == pytest.approx(0.8)
     assert metrics.goal_rate == pytest.approx(0.5)
     assert metrics.truncation_rate == pytest.approx(0.5)
     assert metrics.mean_ep_length == pytest.approx(15.0)

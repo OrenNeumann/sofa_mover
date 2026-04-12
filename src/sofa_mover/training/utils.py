@@ -35,6 +35,7 @@ class EpisodeMetrics:
 
     n_done: int
     area_at_goal: float
+    best_area_at_goal: float
     goal_rate: float
     truncation_rate: float
     mean_ep_length: float
@@ -214,6 +215,7 @@ def extract_episode_metrics(data_flat: TensorDictBase) -> EpisodeMetrics | None:
     # Truncated/area_dead episodes have terminal_area=0, so this naturally
     # combines success rate with area quality.
     area_at_goal = ep_terminal_area.mean().item()
+    best_area_at_goal = ep_terminal_area.max().item()
     goal_rate = (ep_terminal_area > 0).float().mean().item()
     truncation_rate = truncated.float().mean().item()
     mean_ep_length = ep_length.mean().item()
@@ -224,6 +226,7 @@ def extract_episode_metrics(data_flat: TensorDictBase) -> EpisodeMetrics | None:
     return EpisodeMetrics(
         n_done=n_done,
         area_at_goal=area_at_goal,
+        best_area_at_goal=best_area_at_goal,
         goal_rate=goal_rate,
         truncation_rate=truncation_rate,
         mean_ep_length=mean_ep_length,

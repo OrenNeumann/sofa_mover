@@ -30,7 +30,7 @@ stack = build_training_stack(config)
 normalizer: Normalizer = stack.normalizer
 
 # --- Training loop ---
-best_area_at_goal = 0.0
+best_mean_area_at_goal = 0.0
 batch_idx = 0
 total_steps = 0
 training_start = time.perf_counter()
@@ -107,6 +107,7 @@ for data in stack.collector:
         log_payload.update(
             {
                 "episode/area_at_goal": episode_metrics.area_at_goal,
+                "episode/best_area_at_goal": episode_metrics.best_area_at_goal,
                 "episode/goal_rate": episode_metrics.goal_rate,
                 "episode/truncation_rate": episode_metrics.truncation_rate,
                 "episode/episode_length": episode_metrics.mean_ep_length,
@@ -127,8 +128,11 @@ for data in stack.collector:
     run.log(log_payload)
 
     # Save best
-    if episode_metrics is not None and episode_metrics.area_at_goal > best_area_at_goal:
-        best_area_at_goal = episode_metrics.area_at_goal
+    if (
+        episode_metrics is not None
+        and episode_metrics.area_at_goal > best_mean_area_at_goal
+    ):
+        best_mean_area_at_goal = episode_metrics.area_at_goal
         torch.save(
             {
                 "actor": dict(stack.actor.state_dict()),
@@ -136,7 +140,7 @@ for data in stack.collector:
                 "vec_normalize": normalizer.state_dict(),
                 "config": config,
                 "batch_idx": batch_idx,
-                "best_area_at_goal": best_area_at_goal,
+                "best_mean_area_at_goal": best_mean_area_at_goal,
             },
             output_path / "best_policy.pt",
         )
@@ -157,11 +161,11 @@ torch.save(
         "vec_normalize": normalizer.state_dict(),
         "config": config,
         "batch_idx": batch_idx,
-        "best_area_at_goal": best_area_at_goal,
+        "best_mean_area_at_goal": best_mean_area_at_goal,
     },
     final_path,
 )
-print(f"Training complete. Best area at goal: {best_area_at_goal:.4f}")
+print(f"Training complete. Best mean area at goal: {best_mean_area_at_goal:.4f}")
 print(f"Saved to {final_path}")
 
 # Visualize the best policy (fall back to final if no best was saved)
