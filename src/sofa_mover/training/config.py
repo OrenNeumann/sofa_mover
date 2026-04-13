@@ -36,7 +36,7 @@ class SofaEnvConfig:
     delta_theta: float = math.pi / 60
     max_steps: int = 300
     num_substeps: int = 4
-    lambda_erosion: float = 0.1
+    lambda_erosion: float = 0.5
     lambda_progress: float = 1.0
     min_area_fraction: float = 0.05
     initial_pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -54,7 +54,10 @@ class SofaEnvConfig:
     # Boundary sofa-view: number of rays sampled from the sofa contour.
     # Only used for "boundary" observations.
     boundary_rays: int = 128
-    reward_anneal_time: float = 0.6
+    reward_anneal_time: float = 1000.0
+    # Per-step area survival reward: small bonus proportional to current area fraction.
+    # Provides dense feedback about current area level throughout the episode.
+    lambda_area_step: float = 0.002
 
 
 @dataclass(frozen=True)

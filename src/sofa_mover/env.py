@@ -339,8 +339,8 @@ class SofaEnv(EnvBase):
 
         # --- Reward ---
         area_lost = (area_before - area_after).clamp(min=0.0)  # (B,)
-        # penalty for losing area
-        erosion_penalty = -cfg.lambda_erosion * area_lost * self.shaping_scale
+        # penalty for losing area — NOT annealed so agent always cares about area
+        erosion_penalty = -cfg.lambda_erosion * area_lost
         # reward for getting closer to goal
         progress_bonus = (
             cfg.lambda_progress
@@ -348,8 +348,14 @@ class SofaEnv(EnvBase):
             / self.initial_goal_dist
             * self.shaping_scale
         )
-        terminal_bonus = goal_reached.float() * area_after
-        reward = (erosion_penalty + progress_bonus + terminal_bonus).unsqueeze(1)
+        # per-step area survival bonus: dense feedback about current area level
+        area_step_bonus = (
+            cfg.lambda_area_step * area_after / max(self.initial_area, 1e-8)
+        )
+        terminal_bonus = goal_reached.float() * area_after**2
+        reward = (
+            erosion_penalty + progress_bonus + area_step_bonus + terminal_bonus
+        ).unsqueeze(1)
 
         # Update internal state
         self.steps_count += B
