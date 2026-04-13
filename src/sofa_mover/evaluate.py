@@ -48,7 +48,7 @@ def evaluate(
     encoder: SofaEncoder | SofaBoundaryEncoder
     if cfg.observation_type == "boundary":
         encoder = SofaBoundaryEncoder(
-            n_rays=cfg.boundary_rays,
+            n_rays=2 * cfg.boundary_rays,
             normalizer=normalizer,
         )
     else:

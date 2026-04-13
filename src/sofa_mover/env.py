@@ -168,7 +168,7 @@ class SofaEnv(EnvBase):
             obs_spec = Bounded(
                 low=0.0,
                 high=1.0,
-                shape=(B, self.cfg.boundary_rays),
+                shape=(B, 2 * self.cfg.boundary_rays),
                 dtype=torch.float32,
                 device=self.device,
             )
@@ -254,7 +254,9 @@ class SofaEnv(EnvBase):
             self._episode_total_distance[reset_mask] = 0.0
 
         if self.cfg.observation_type == "boundary":
-            sofa_view = self._boundary(self._sofa)
+            # TODO: can we get rid of this op?
+            corridor = self.rasterizer.corridor_mask(self._pose)
+            sofa_view = self._boundary(self._sofa, corridor)
         else:  # "grid"
             sofa_view = self._downscale_obs(self._sofa.to(torch.uint8))
 
@@ -310,7 +312,7 @@ class SofaEnv(EnvBase):
         )  # (B,)
 
         # Swept mask erosion (rasterizer already operates on the cropped grid)
-        swept, _corridor_at_next = self.rasterizer.swept_mask(
+        swept, corridor_at_next = self.rasterizer.swept_mask(
             pose, pose_next, cfg.num_substeps
         )
         # Erosion: sofa ∩ corridor removes pixels outside the corridor
@@ -356,7 +358,7 @@ class SofaEnv(EnvBase):
         self._goal_dist = goal_dist
 
         if self.cfg.observation_type == "boundary":
-            sofa_view = self._boundary(new_sofa)
+            sofa_view = self._boundary(new_sofa, corridor_at_next)
         else:  # "grid"
             sofa_view = self._downscale_obs(new_sofa.to(torch.uint8))
 

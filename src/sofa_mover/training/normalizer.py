@@ -127,7 +127,7 @@ class Normalizer:
         norm_obs = config.normalize_observation
         obs_dim: int | None = None
         if env_cfg.observation_type == "boundary":
-            obs_dim = env_cfg.boundary_rays + 3 + 1
+            obs_dim = 2 * env_cfg.boundary_rays + 3 + 1
         elif norm_obs:
             warnings.warn(
                 "Observation normalization is disabled for grid observations. "

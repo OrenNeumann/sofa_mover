@@ -80,7 +80,7 @@ def _make_actor_module(
     encoder: SofaEncoder | SofaBoundaryEncoder
     if cfg.observation_type == "boundary":
         encoder = SofaBoundaryEncoder(
-            n_rays=cfg.boundary_rays,
+            n_rays=2 * cfg.boundary_rays,
             normalizer=normalizer,
         )
     else:
@@ -205,7 +205,7 @@ class TestObservationNormalization:
         cfg = _test_cfg(boundary_rays=BOUNDARY_RAYS)
         normalizer = _make_normalizer(cfg)
         assert normalizer._obs_rms is not None
-        assert normalizer._obs_rms.mean.shape == torch.Size([BOUNDARY_RAYS + 4])
+        assert normalizer._obs_rms.mean.shape == torch.Size([2 * BOUNDARY_RAYS + 4])
 
     def test_grid_observation_normalization_is_disabled_with_warning(self) -> None:
         config = _training_config(

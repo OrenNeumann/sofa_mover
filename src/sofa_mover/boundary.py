@@ -38,14 +38,19 @@ class BoundaryExtractor:
         grid_y = 2.0 * rows / (crop_h - 1) - 1.0
         self._ray_grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
 
-    def __call__(self, sofa: Float[Tensor, "B 1 H W"]) -> Float[Tensor, "B N"]:
-        """Extract radial boundary profile, normalized to [0, 1]."""
-        sofa = sofa.float()  # grid_sample requires float input
-        grid = self._ray_grid.expand(sofa.shape[0], -1, -1, -1)
+    def __call__(
+        self,
+        sofa: Float[Tensor, "B 1 H W"],
+        corridor: Float[Tensor, "B 1 H W"],
+    ) -> Float[Tensor, "B 2N"]:
+        """Extract concatenated [sofa | corridor] radial boundary profiles."""
+        combined = torch.cat([sofa, corridor], dim=1).float()  # (B, 2, H, W)
+        grid = self._ray_grid.expand(combined.shape[0], -1, -1, -1)
         # fmt: off
         samples = F.grid_sample(
-            sofa, grid, mode="nearest", padding_mode="zeros", align_corners=True
-        )[:, 0]  # (B, N, M)
+            combined, grid, mode="nearest", padding_mode="zeros", align_corners=True
+        )  # (B, 2, N, M)
         # fmt: on
         # Count consecutive 1s from center along each ray
-        return samples.cumprod(dim=-1).sum(dim=-1) / self._n_samples
+        rays = samples.cumprod(dim=-1).sum(dim=-1) / self._n_samples  # (B, 2, N)
+        return rays.flatten(1)  # (B, 2*N)

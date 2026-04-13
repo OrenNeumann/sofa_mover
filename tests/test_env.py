@@ -316,14 +316,14 @@ class TestObsModes:
         )
         td = env.reset()
         obs = td["observation", "sofa_view"]
-        assert obs.shape == (2, 64)
+        assert obs.shape == (2, 128)
         assert obs.dtype == torch.float32
         assert obs.min() >= 0.0
         assert obs.max() <= 1.0
         # After stepping, boundary should still be valid
         td["action"] = _noop_action(2)
         td_next = env.step(td)["next"]
-        assert td_next["observation", "sofa_view"].shape == (2, 64)
+        assert td_next["observation", "sofa_view"].shape == (2, 128)
 
 
 class TestRollout:

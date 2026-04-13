@@ -55,7 +55,7 @@ def build_training_stack(
     encoder: SofaEncoder | SofaBoundaryEncoder
     if env_cfg.observation_type == "boundary":
         encoder = SofaBoundaryEncoder(
-            n_rays=env_cfg.boundary_rays,
+            n_rays=2 * env_cfg.boundary_rays,
             normalizer=normalizer,
         )
     else:  # "grid"
