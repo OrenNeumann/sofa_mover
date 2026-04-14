@@ -32,8 +32,8 @@ class SofaEnvConfig:
 
     sofa_config: GridConfig = SOFA_CONFIG
     corridor_width: float = 1.0
-    delta_xy: float = 0.05
-    delta_theta: float = math.pi / 60
+    delta_xy: float = 0.05 / 3
+    delta_theta: float = math.pi / (60 * 3)
     max_steps: int = 300
     num_substeps: int = 4
     lambda_erosion: float = 0.5
@@ -41,7 +41,7 @@ class SofaEnvConfig:
     min_area_fraction: float = 0.05
     initial_pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
     # Length of the sofa in world units along the corridor.
-    sofa_length: float = 2.7
+    sofa_length: float = 2.7  # TODO: should be >= 2*(1+sqrt(2)), the upper bound.
     # Max y in corridor coords for the front edge of the initial sofa.
     start_y_max: float = -1.5
     # Goal point in corridor-centric coords (middle of exit end)
@@ -58,6 +58,10 @@ class SofaEnvConfig:
     # Per-step area survival reward: small bonus proportional to current area fraction.
     # Provides dense feedback about current area level throughout the episode.
     lambda_area_step: float = 0.002
+    # MultiDiscrete action space: number of non-zero magnitude levels per axis.
+    # Each axis gets 2*n_magnitude_levels+1 bins: {-n·δ, ..., -δ, 0, +δ, ..., +n·δ}.
+    # Actions are sampled independently per axis (dx, dy, dθ).
+    n_magnitude_levels: int = 3
 
 
 @dataclass(frozen=True)

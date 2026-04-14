@@ -4,10 +4,15 @@ from pathlib import Path
 
 import torch
 from tensordict.nn import TensorDictModule
-from torchrl.modules import OneHotCategorical, ProbabilisticActor
+from torchrl.modules import ProbabilisticActor
 
 from sofa_mover.env import make_sofa_env
-from sofa_mover.networks import SofaActorNet, SofaBoundaryEncoder, SofaEncoder
+from sofa_mover.networks import (
+    MultiDiscreteCategorical,
+    SofaActorNet,
+    SofaBoundaryEncoder,
+    SofaEncoder,
+)
 from sofa_mover.training.config import DEVICE, TrainingConfig
 from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.visualization.render import (
@@ -45,6 +50,9 @@ def evaluate(
     if "vec_normalize" in checkpoint:
         normalizer.load_state_dict(checkpoint["vec_normalize"])
 
+    n_bins = 2 * cfg.n_magnitude_levels + 1
+    nvec = [n_bins, n_bins, n_bins]
+
     encoder: SofaEncoder | SofaBoundaryEncoder
     if cfg.observation_type == "boundary":
         encoder = SofaBoundaryEncoder(
@@ -53,7 +61,7 @@ def evaluate(
         )
     else:
         encoder = SofaEncoder()
-    actor_net = SofaActorNet(encoder=encoder).to(device)
+    actor_net = SofaActorNet(nvec=nvec, encoder=encoder).to(device)
     actor_module = TensorDictModule(
         actor_net,
         in_keys=[
@@ -67,7 +75,8 @@ def evaluate(
         module=actor_module,
         in_keys=["logits"],
         out_keys=["action"],
-        distribution_class=OneHotCategorical,
+        distribution_class=MultiDiscreteCategorical,
+        distribution_kwargs={"nvec": nvec},
     )
     actor.load_state_dict(checkpoint["actor"])
     actor.eval()
@@ -91,10 +100,16 @@ def evaluate(
             _collect_frame(step)
 
             td = actor_module(td)
+            # Greedy: argmax independently per axis, then concatenate one-hots
             logits = td["logits"]
-            action = torch.zeros_like(logits)
-            action.scatter_(1, logits.argmax(dim=-1, keepdim=True), 1.0)
-            td["action"] = action
+            split_logits = logits.split(nvec, dim=-1)
+            one_hots = [
+                torch.zeros(logits.shape[0], n, device=device).scatter_(
+                    1, lg.argmax(dim=-1, keepdim=True), 1.0
+                )
+                for lg, n in zip(split_logits, nvec)
+            ]
+            td["action"] = torch.cat(one_hots, dim=-1)
 
             td = env.step(td)["next"]
 

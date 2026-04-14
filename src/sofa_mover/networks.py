@@ -2,10 +2,73 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from jaxtyping import Float
 from torch import Tensor
 
 from sofa_mover.training.normalizer import Normalizer
+
+
+class MultiDiscreteCategorical(torch.distributions.Distribution):
+    """Independent Categoricals over a concatenated one-hot action vector.
+
+    Each axis is sampled independently; log_prob and entropy are sums across axes.
+
+    Args:
+        logits: Concatenated logits of shape (..., sum(nvec)).
+        nvec: Number of bins per axis.
+    """
+
+    has_enumerate_support = False
+    has_rsample = False
+
+    def __init__(self, logits: Tensor, nvec: list[int]) -> None:
+        self.nvec = nvec
+        split_logits = logits.split(nvec, dim=-1)
+        self._dists = [
+            torch.distributions.Categorical(logits=lg) for lg in split_logits
+        ]
+        super().__init__(batch_shape=logits.shape[:-1])
+
+    def sample(
+        self, sample_shape: torch.Size | list[int] | tuple[int, ...] = torch.Size()
+    ) -> Tensor:
+        indices = [d.sample(sample_shape) for d in self._dists]
+        one_hots = [F.one_hot(i, n).float() for i, n in zip(indices, self.nvec)]
+        return torch.cat(one_hots, dim=-1)
+
+    def rsample(
+        self, sample_shape: torch.Size | list[int] | tuple[int, ...] = torch.Size()
+    ) -> Tensor:
+        return self.sample(sample_shape)
+
+    def log_prob(self, action: Tensor) -> Tensor:
+        """action: (..., sum(nvec)) concatenated one-hot (float or bool)."""
+        split_actions = action.split(self.nvec, dim=-1)
+        indices = [a.argmax(dim=-1) for a in split_actions]
+        log_probs = torch.stack(
+            [d.log_prob(i) for d, i in zip(self._dists, indices)], dim=-1
+        )
+        return log_probs.sum(dim=-1)
+
+    def entropy(self) -> Tensor:
+        entropies = torch.stack([d.entropy() for d in self._dists], dim=-1)
+        return entropies.sum(dim=-1)
+
+    @property
+    def mode(self) -> Tensor:
+        """Greedy (mode) action: argmax per axis, returned as concatenated one-hot."""
+        modes = [d.logits.argmax(dim=-1) for d in self._dists]
+        one_hots = [F.one_hot(m, n).float() for m, n in zip(modes, self.nvec)]
+        return torch.cat(one_hots, dim=-1)
+
+    @property
+    def mean(self) -> Tensor:
+        return self.mode
+
+    @property
+    def deterministic_sample(self) -> Tensor:
+        return self.mode
 
 
 class SofaEncoder(nn.Module):
@@ -101,20 +164,27 @@ class SofaActorNet(nn.Module):
     Uses a shared encoder (call .encoder to get the same instance for the
     critic). Accepts either SofaEncoder (grid) or SofaBoundaryEncoder, so
     sofa_view may be image-shaped or already flattened.
+
+    Args:
+        nvec: Bins per axis for the MultiDiscrete action space (from config).
+            The head outputs sum(nvec) logits (concatenated per-axis logits).
+        feature_dim: Size of the shared encoder output.
+        encoder: Optional pre-built encoder to share with the critic.
     """
 
     def __init__(
         self,
+        nvec: list[int],
         feature_dim: int = 128,
-        n_actions: int = 27,
         encoder: SofaEncoder | SofaBoundaryEncoder | None = None,
     ) -> None:
         super().__init__()
+        self.nvec = nvec
         self.encoder = encoder if encoder is not None else SofaEncoder(feature_dim)
         self.head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim),
             nn.ReLU(),
-            nn.Linear(feature_dim, n_actions),
+            nn.Linear(feature_dim, sum(nvec)),
         )
 
     def forward(

@@ -77,6 +77,8 @@ def _make_actor_module(
     cfg: SofaEnvConfig,
     normalizer: Normalizer,
 ) -> TensorDictModule:
+    n_bins = 2 * cfg.n_magnitude_levels + 1
+    nvec = [n_bins, n_bins, n_bins]
     encoder: SofaEncoder | SofaBoundaryEncoder
     if cfg.observation_type == "boundary":
         encoder = SofaBoundaryEncoder(
@@ -85,7 +87,7 @@ def _make_actor_module(
         )
     else:
         encoder = SofaEncoder()
-    actor_net = SofaActorNet(encoder=encoder)
+    actor_net = SofaActorNet(nvec=nvec, encoder=encoder)
     return TensorDictModule(
         actor_net,
         in_keys=[
@@ -108,21 +110,24 @@ def _make_boundary_actor_stack(
     return cfg, env, normalizer, actor_module
 
 
-def _random_action(batch_size: int) -> torch.Tensor:
-    action = torch.zeros(batch_size, 27, device=TEST_DEVICE)
-    idx = torch.randint(0, 27, (batch_size,), device=TEST_DEVICE)
-    action.scatter_(1, idx.unsqueeze(1), 1.0)
+def _random_action(batch_size: int, n_bins: int) -> torch.Tensor:
+    """Random independent action per axis (MultiDiscrete format)."""
+    action = torch.zeros(batch_size, 3 * n_bins, device=TEST_DEVICE)
+    for axis in range(3):
+        idx = torch.randint(0, n_bins, (batch_size,), device=TEST_DEVICE)
+        action.scatter_(1, (idx + axis * n_bins).unsqueeze(1), 1.0)
     return action
 
 
 def _collect_reward_batch(
     env: SofaEnv, num_steps: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    n_bins = env.n_bins
     td = env.reset()
     rewards: list[torch.Tensor] = []
     done: list[torch.Tensor] = []
     for _ in range(num_steps):
-        td["action"] = _random_action(NUM_ENVS)
+        td["action"] = _random_action(NUM_ENVS, n_bins)
         td = env.step(td)["next"]
         rewards.append(td["reward"].clone())
         done.append(td["done"].clone())

@@ -6,16 +6,17 @@ from dataclasses import dataclass
 import torch
 from tensordict.nn import TensorDictModule
 from torchrl.collectors import Collector
-from torchrl.modules import OneHotCategorical, ProbabilisticActor, ValueOperator
+from torchrl.modules import ProbabilisticActor, ValueOperator
 
 from sofa_mover.env import SofaEnv, make_sofa_env
-from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.networks import (
+    MultiDiscreteCategorical,
     SofaActorNet,
     SofaBoundaryEncoder,
     SofaCriticNet,
     SofaEncoder,
 )
+from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.training.config import TrainingConfig
 
 
@@ -52,6 +53,10 @@ def build_training_stack(
     normalizer = Normalizer.from_config(config, num_envs)
 
     # --- Networks (encoder selected from cfg) ---
+    # bins for [-n·δ, ..., -δ, 0, +δ, ..., +n·δ]
+    n_bins = 2 * env_cfg.n_magnitude_levels + 1
+    nvec = [n_bins, n_bins, n_bins]
+
     encoder: SofaEncoder | SofaBoundaryEncoder
     if env_cfg.observation_type == "boundary":
         encoder = SofaBoundaryEncoder(
@@ -60,7 +65,7 @@ def build_training_stack(
         )
     else:  # "grid"
         encoder = SofaEncoder()
-    actor_net = SofaActorNet(encoder=encoder).to(device)
+    actor_net = SofaActorNet(nvec=nvec, encoder=encoder).to(device)
     critic_net = SofaCriticNet(encoder=actor_net.encoder).to(device)
 
     # Wrap actor for TorchRL
@@ -77,7 +82,8 @@ def build_training_stack(
         module=actor_module,
         in_keys=["logits"],
         out_keys=["action"],
-        distribution_class=OneHotCategorical,
+        distribution_class=MultiDiscreteCategorical,
+        distribution_kwargs={"nvec": nvec},
         return_log_prob=True,
     )
 

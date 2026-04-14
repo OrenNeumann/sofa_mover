@@ -6,7 +6,7 @@ from jaxtyping import Float
 from sofa_mover.boundary import BoundaryExtractor
 from tensordict import TensorDict, TensorDictBase
 from torch import Tensor
-from torchrl.data.tensor_specs import Bounded, Composite, OneHot, Unbounded
+from torchrl.data.tensor_specs import Bounded, Composite, MultiOneHot, Unbounded
 from torchrl.envs import EnvBase
 
 from sofa_mover.corridor import Pose, make_l_corridor
@@ -68,25 +68,26 @@ class SofaEnv(EnvBase):
         self.steps_count = 0
         self._anneal_end = total_frames * cfg.reward_anneal_time
 
-        # Action decode table: 27 actions → (dx, dy, dθ)
-        deltas_xy = torch.tensor([-cfg.delta_xy, 0.0, cfg.delta_xy], device=device)
-        deltas_theta = torch.tensor(
-            [-cfg.delta_theta, 0.0, cfg.delta_theta], device=device
+        # MultiDiscrete action space: each of (dx, dy, dθ) is chosen independently
+        # from n_bins = 2*n_magnitude_levels+1 options: {-n·δ, …, 0, …, +n·δ}.
+        n_mag = cfg.n_magnitude_levels
+        n_bins = 2 * n_mag + 1
+        self.n_bins = n_bins
+        # Build as [-n·δ, ..., -δ, 0, +δ, ..., +n·δ] with exact 0 at center.
+        xy_pos = (
+            torch.arange(1, n_mag + 1, dtype=torch.float32, device=device)
+            * cfg.delta_xy
         )
-        dx_idx, dy_idx, dt_idx = torch.meshgrid(
-            torch.arange(3, device=device),
-            torch.arange(3, device=device),
-            torch.arange(3, device=device),
-            indexing="ij",
+        theta_pos = (
+            torch.arange(1, n_mag + 1, dtype=torch.float32, device=device)
+            * cfg.delta_theta
         )
-        self.action_to_delta = torch.stack(
-            [
-                deltas_xy[dx_idx.flatten()],
-                deltas_xy[dy_idx.flatten()],
-                deltas_theta[dt_idx.flatten()],
-            ],
-            dim=-1,
-        )  # (27, 3)
+        self.xy_action_vals = torch.cat(
+            [-xy_pos.flip(0), torch.zeros(1, device=device), xy_pos]
+        )  # (n_bins,)
+        self.theta_action_vals = torch.cat(
+            [-theta_pos.flip(0), torch.zeros(1, device=device), theta_pos]
+        )  # (n_bins,)
 
         # Goal point in corridor-centric coords (constant)
         self.goal_corridor: torch.Tensor = torch.tensor(cfg.goal_point, device=device)
@@ -205,9 +206,10 @@ class SofaEnv(EnvBase):
             shape=(B,),
         )
 
-        self.action_spec = OneHot(
-            n=27,
-            shape=(B, 27),
+        n_bins = self.n_bins
+        self.action_spec = MultiOneHot(
+            nvec=[n_bins, n_bins, n_bins],
+            shape=(B, 3 * n_bins),
             dtype=torch.float32,
             device=self.device,
         )
@@ -292,11 +294,14 @@ class SofaEnv(EnvBase):
         cfg = self.cfg
         B = self.num_envs
 
-        action = tensordict["action"]  # (B, 27) one-hot
+        action = tensordict["action"]  # (B, 3*n_bins) concatenated one-hot
 
-        # Decode action
-        action_idx = action.argmax(dim=-1)  # (B,)
-        delta = self.action_to_delta[action_idx]  # (B, 3)
+        # Decode one-hots action: argmax each of (dx,dy,dtheta)
+        dx_oh, dy_oh, dt_oh = action.split(self.n_bins, dim=-1)
+        dx = self.xy_action_vals[dx_oh.argmax(dim=-1)]  # (B,)
+        dy = self.xy_action_vals[dy_oh.argmax(dim=-1)]  # (B,)
+        dtheta = self.theta_action_vals[dt_oh.argmax(dim=-1)]  # (B,)
+        delta = torch.stack([dx, dy, dtheta], dim=-1)  # (B, 3)
 
         # Accumulate episode metrics
         dx, dy, dtheta = delta[:, 0], delta[:, 1], delta[:, 2]

@@ -28,6 +28,35 @@ def _test_cfg(**overrides: object) -> SofaEnvConfig:
     return SofaEnvConfig(**defaults)  # type: ignore[arg-type]
 
 
+def _n_bins(cfg: SofaEnvConfig | None = None) -> int:
+    if cfg is None:
+        cfg = _test_cfg()
+    return 2 * cfg.n_magnitude_levels + 1
+
+
+def _noop_action(B: int, n_bins: int | None = None) -> torch.Tensor:
+    """Concatenated one-hot with zero delta on all axes (center bin per axis)."""
+    if n_bins is None:
+        n_bins = _n_bins()
+    mid = n_bins // 2
+    action = torch.zeros(B, 3 * n_bins, device=TEST_DEVICE)
+    action[:, mid] = 1.0  # dx = 0
+    action[:, n_bins + mid] = 1.0  # dy = 0
+    action[:, 2 * n_bins + mid] = 1.0  # dtheta = 0
+    return action
+
+
+def _random_action(B: int, n_bins: int | None = None) -> torch.Tensor:
+    """Random independent action per axis."""
+    if n_bins is None:
+        n_bins = _n_bins()
+    action = torch.zeros(B, 3 * n_bins, device=TEST_DEVICE)
+    for axis in range(3):
+        idx = torch.randint(0, n_bins, (B,))
+        action.scatter_(1, (idx + axis * n_bins).unsqueeze(1), 1.0)
+    return action
+
+
 @pytest.fixture(scope="module")
 def env():
     """Shared env instance — small grid on CPU for speed."""
@@ -37,20 +66,6 @@ def env():
         cfg=_test_cfg(),
         device=TEST_DEVICE,
     )
-
-
-def _noop_action(B: int) -> torch.Tensor:
-    """Action index 13 = center of 3x3x3: (dx=0, dy=0, dtheta=0)."""
-    action = torch.zeros(B, 27, device=TEST_DEVICE)
-    action[:, 13] = 1.0
-    return action
-
-
-def _random_action(B: int) -> torch.Tensor:
-    action = torch.zeros(B, 27, device=TEST_DEVICE)
-    idx = torch.randint(0, 27, (B,))
-    action.scatter_(1, idx.unsqueeze(1), 1.0)
-    return action
 
 
 class TestReset:
@@ -96,7 +111,7 @@ class TestReset:
 class TestStep:
     def test_step_shapes(self, env) -> None:
         td = env.reset()
-        td["action"] = _noop_action(NUM_ENVS)
+        td["action"] = _noop_action(NUM_ENVS, env.n_bins)
         td_next = env.step(td)["next"]
         obs = td_next["observation", "sofa_view"]
         assert obs.shape[0] == NUM_ENVS
@@ -109,7 +124,7 @@ class TestStep:
     def test_noop_preserves_area(self, env) -> None:
         td = env.reset()
         area_before = env._sofa.sum().item()
-        td["action"] = _noop_action(NUM_ENVS)
+        td["action"] = _noop_action(NUM_ENVS, env.n_bins)
         env.step(td)
         area_after = env._sofa.sum().item()
         assert area_after == pytest.approx(area_before, rel=1e-5)
@@ -118,7 +133,7 @@ class TestStep:
         td = env.reset()
         prev_area = env._sofa.sum().item()
         for _ in range(5):
-            td["action"] = _random_action(NUM_ENVS)
+            td["action"] = _random_action(NUM_ENVS, env.n_bins)
             td = env.step(td)["next"]
             area = env._sofa.sum().item()
             assert area <= prev_area + 1e-5
@@ -127,7 +142,7 @@ class TestStep:
     def test_truncation_at_max_steps(self, env) -> None:
         td = env.reset()
         for _ in range(env.cfg.max_steps):
-            td["action"] = _noop_action(NUM_ENVS)
+            td["action"] = _noop_action(NUM_ENVS, env.n_bins)
             td = env.step(td)["next"]
         assert td["done"].all()
         assert td["truncated"].all()
@@ -135,7 +150,7 @@ class TestStep:
     def test_noop_gives_zero_reward(self, env) -> None:
         """Standing still: no erosion, no terminal bonus."""
         td = env.reset()
-        td["action"] = _noop_action(NUM_ENVS)
+        td["action"] = _noop_action(NUM_ENVS, env.n_bins)
         td_next = env.step(td)["next"]
         assert (td_next["reward"].abs() < 0.01).all()
 
@@ -155,11 +170,15 @@ class TestGoalDetection:
             cfg=cfg,
             device=TEST_DEVICE,
         )
+        n_bins = env.n_bins
+        mid = n_bins // 2
         td = env.reset()
         for _ in range(100):
-            # dx=0, dy=-d, dt=+d  →  index = 1*9 + 0*3 + 2 = 11
-            action = torch.zeros(1, 27, device=TEST_DEVICE)
-            action[0, 11] = 1.0
+            # dx=0, dy=-max_magnitude, dtheta=+max_magnitude
+            action = torch.zeros(1, 3 * n_bins, device=TEST_DEVICE)
+            action[0, mid] = 1.0  # dx = 0
+            action[0, n_bins + 0] = 1.0  # dy = most negative
+            action[0, 2 * n_bins + (n_bins - 1)] = 1.0  # dtheta = most positive
             td["action"] = action
             td = env.step(td)["next"]
             if td["done"].all():
@@ -175,12 +194,16 @@ class TestGoalDetection:
             cfg=cfg,
             device=TEST_DEVICE,
         )
+        n_bins = env.n_bins
+        mid = n_bins // 2
         td = env.reset()
         initial_progress = td["observation", "progress"][0].item()
-        # Move: translate down + rotate (navigating the bend)
+        # Move: dx=0, dy=-1 magnitude, dtheta=+1 magnitude
         for _ in range(5):
-            action = torch.zeros(1, 27, device=TEST_DEVICE)
-            action[0, 1 * 9 + 0 * 3 + 2] = 1.0  # dx=0, dy=-, dt=+
+            action = torch.zeros(1, 3 * n_bins, device=TEST_DEVICE)
+            action[0, mid] = 1.0  # dx = 0
+            action[0, n_bins + (mid - 1)] = 1.0  # dy = -1 magnitude
+            action[0, 2 * n_bins + (mid + 1)] = 1.0  # dtheta = +1 magnitude
             td["action"] = action
             td = env.step(td)["next"]
         assert td["observation", "progress"][0].item() > initial_progress
@@ -189,7 +212,7 @@ class TestGoalDetection:
 class TestEpisodeAccumulators:
     def test_accumulators_present_in_step_output(self, env) -> None:
         td = env.reset()
-        td["action"] = _noop_action(NUM_ENVS)
+        td["action"] = _noop_action(NUM_ENVS, env.n_bins)
         td_next = env.step(td)["next"]
         for key in [
             "episode_total_angle",
@@ -202,7 +225,7 @@ class TestEpisodeAccumulators:
 
     def test_noop_angle_and_distance_zero(self, env) -> None:
         td = env.reset()
-        td["action"] = _noop_action(NUM_ENVS)
+        td["action"] = _noop_action(NUM_ENVS, env.n_bins)
         td_next = env.step(td)["next"]
         assert (td_next["episode_total_angle"] == 0).all()
         assert (td_next["episode_total_distance"] == 0).all()
@@ -215,10 +238,13 @@ class TestEpisodeAccumulators:
             cfg=cfg,
             device=TEST_DEVICE,
         )
+        n_bins = env.n_bins
         td = env.reset()
-        # Action 0 = (-delta_xy, -delta_xy, -delta_theta) — moves in all axes
-        action = torch.zeros(1, 27, device=TEST_DEVICE)
-        action[0, 0] = 1.0
+        # Action: all axes at most-negative magnitude (dx, dy, dtheta all negative)
+        action = torch.zeros(1, 3 * n_bins, device=TEST_DEVICE)
+        action[0, 0] = 1.0  # dx = most negative
+        action[0, n_bins + 0] = 1.0  # dy = most negative
+        action[0, 2 * n_bins + 0] = 1.0  # dtheta = most negative
         prev_dist = 0.0
         prev_angle = 0.0
         for _ in range(3):
@@ -239,10 +265,13 @@ class TestEpisodeAccumulators:
             cfg=cfg,
             device=TEST_DEVICE,
         )
+        n_bins = env.n_bins
         td = env.reset()
         # Run to truncation with non-noop actions
-        action = torch.zeros(1, 27, device=TEST_DEVICE)
+        action = torch.zeros(1, 3 * n_bins, device=TEST_DEVICE)
         action[0, 0] = 1.0
+        action[0, n_bins + 0] = 1.0
+        action[0, 2 * n_bins + 0] = 1.0
         for _ in range(3):
             td["action"] = action
             td = env.step(td)["next"]
@@ -251,7 +280,7 @@ class TestEpisodeAccumulators:
         assert td["episode_total_angle"][0].item() > 0
         # Reset and step — accumulators should be fresh
         td2 = env.reset()
-        td2["action"] = _noop_action(1)
+        td2["action"] = _noop_action(1, n_bins)
         td2_next = env.step(td2)["next"]
         assert td2_next["episode_total_angle"][0].item() == 0.0
         assert td2_next["episode_total_distance"][0].item() == 0.0
@@ -267,7 +296,7 @@ class TestEpisodeAccumulators:
         )
         td = env.reset()
         for _ in range(3):
-            td["action"] = _noop_action(1)
+            td["action"] = _noop_action(1, env.n_bins)
             td = env.step(td)["next"]
         assert td["done"].all()
         assert td["truncated"].all()
@@ -284,7 +313,7 @@ class TestEpisodeAccumulators:
             device=TEST_DEVICE,
         )
         td = env.reset()
-        td["action"] = _noop_action(1)
+        td["action"] = _noop_action(1, env.n_bins)
         td = env.step(td)["next"]
         assert td["terminated"].all()
         assert td["terminal_area"][0].item() > 0.0
@@ -321,7 +350,7 @@ class TestObsModes:
         assert obs.min() >= 0.0
         assert obs.max() <= 1.0
         # After stepping, boundary should still be valid
-        td["action"] = _noop_action(2)
+        td["action"] = _noop_action(2, env.n_bins)
         td_next = env.step(td)["next"]
         assert td_next["observation", "sofa_view"].shape == (2, 128)
 

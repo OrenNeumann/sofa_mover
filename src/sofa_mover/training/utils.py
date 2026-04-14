@@ -7,10 +7,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDictBase
-from torchrl.modules import OneHotCategorical
 
 from sofa_mover.env import SofaEnv
-from sofa_mover.networks import SofaActorNet, SofaCriticNet
+from sofa_mover.networks import MultiDiscreteCategorical, SofaActorNet, SofaCriticNet
 from sofa_mover.visualization.render import build_composite
 
 # TensorDict keys set by TorchRL's ProbabilisticActor / used by GAE computation
@@ -111,6 +110,7 @@ def optimize_ppo_epochs(
     Calls the shared encoder once per minibatch (not twice as separate
     actor/critic forward passes would).
     """
+    nvec = actor_net.nvec
     N = data_flat.shape[0]
 
     # Extract all relevant tensors from the TensorDict once (outside the epoch
@@ -151,7 +151,7 @@ def optimize_ppo_epochs(
             )
 
             logits = actor_head(features)
-            dist = OneHotCategorical(logits=logits)
+            dist = MultiDiscreteCategorical(logits=logits, nvec=nvec)
             new_log_prob = dist.log_prob(act_s[mb_start:mb_end])
             entropy = dist.entropy()
 
