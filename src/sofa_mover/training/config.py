@@ -41,11 +41,11 @@ class SofaEnvConfig:
     min_area_fraction: float = 0.05
     initial_pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
     # Length of the sofa in world units along the corridor.
-    sofa_length: float = 2.7  # TODO: should be >= 2*(1+sqrt(2)), the upper bound.
+    sofa_length: float = 3.5  # TODO: should be >= 2*(1+sqrt(2)), the upper bound.
     # Max y in corridor coords for the front edge of the initial sofa.
     start_y_max: float = -1.5
     # Goal point in corridor-centric coords (middle of exit end)
-    goal_point: tuple[float, float] = (2.6, 0.0)
+    goal_point: tuple[float, float] = (3.5, 0.0)
     goal_radius: float = 0.3
     observation_type: ObservationType = "boundary"
     # Grid sofa-view downscale factor (1 = full res, 2 = half, 4 = quarter)

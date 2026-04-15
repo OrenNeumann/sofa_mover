@@ -127,10 +127,10 @@ class SofaEnv(EnvBase):
 
         init_pose = torch.tensor([list(cfg.initial_pose)], device=device)
         init_sofa = self.rasterizer.corridor_mask(init_pose)
-        self.initial_area = init_sofa.sum().item() * self.cell_area
+        self.initial_area = init_sofa.sum() * self.cell_area
         init_com = _sofa_com(init_sofa, self.x_grid, self.y_grid)
         init_goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, init_pose)
-        self.initial_goal_dist = (init_com - init_goal_sofa).norm(dim=-1).item()
+        self.initial_goal_dist = (init_com - init_goal_sofa).norm(dim=-1)
 
         # Internal state
         self._sofa = torch.ones(
@@ -337,15 +337,19 @@ class SofaEnv(EnvBase):
         self._step_count += 1
 
         # Done conditions
-        area_dead = (area_after / max(self.initial_area, 1e-8)) < cfg.min_area_fraction
+        area_dead = (
+            area_after / self.initial_area.clamp(min=1e-8)
+        ) < cfg.min_area_fraction
         truncated = self._step_count.squeeze(1) >= cfg.max_steps
         terminated = goal_reached | area_dead
         done = terminated | truncated
 
         # --- Reward ---
         area_lost = (area_before - area_after).clamp(min=0.0)  # (B,)
-        # penalty for losing area — NOT annealed so agent always cares about area
-        erosion_penalty = -cfg.lambda_erosion * area_lost
+        # penalty for losing area fraction, normalized by initial_area
+        erosion_penalty = (
+            -cfg.lambda_erosion * area_lost / self.initial_area.clamp(min=1e-8)
+        )
         # reward for getting closer to goal
         progress_bonus = (
             cfg.lambda_progress
@@ -355,7 +359,7 @@ class SofaEnv(EnvBase):
         )
         # per-step area survival bonus: dense feedback about current area level
         area_step_bonus = (
-            cfg.lambda_area_step * area_after / max(self.initial_area, 1e-8)
+            cfg.lambda_area_step * area_after / self.initial_area.clamp(min=1e-8)
         )
         terminal_bonus = goal_reached.float() * area_after**2
         reward = (

@@ -308,8 +308,8 @@ def rotate_extent_counterclockwise(extent: Extent) -> Extent:
 def _render_palette_frame(fig: matplotlib.figure.Figure) -> Image.Image:
     """Rasterize the current figure into a paletted image for GIF encoding."""
     fig.canvas.draw()
-    rgba = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)
-    return Image.fromarray(rgba, mode="RGBA").convert("P", palette=Image.ADAPTIVE)
+    rgba = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)  # type: ignore[attr-defined]
+    return Image.fromarray(rgba, mode="RGBA").convert("P", palette=Image.ADAPTIVE)  # type: ignore[attr-defined]
 
 
 def _write_streaming_gif(
