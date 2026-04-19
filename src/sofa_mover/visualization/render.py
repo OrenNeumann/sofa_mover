@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from jaxtyping import Float
 from numpy.typing import NDArray
-from PIL import GifImagePlugin, Image
+from PIL import GifImagePlugin, Image, ImageFilter
 from torch import Tensor
 from tqdm import TqdmExperimentalWarning
 from tqdm.rich import tqdm
@@ -26,11 +26,12 @@ Extent = tuple[float, float, float, float]
 
 DARK_GRAY = np.array([0.2, 0.2, 0.2], dtype=np.float32)
 STEEL_BLUE = np.array([0.27, 0.47, 0.73], dtype=np.float32)
+GLOW_ORANGE = np.array([1.0, 0.76, 0.28], dtype=np.float32)
 LEFT_PAD_FRACTION = 0.08
 TITLE_PAD = 12.0
 TOP_LAYOUT_MARGIN = 0.90
 # World width spanned by one full repeat of the floor texture.
-FLOOR_TILE_WORLD_SIZE_X: float = 1.5
+FLOOR_TILE_WORLD_SIZE_X: float = 4.5
 # Aspect-preserving load of the parquet texture at moderate resolution.  The
 # shorter side is fixed so we get a well-filtered (Lanczos) downsample while
 # keeping horizontal/vertical detail proportional to the source.
@@ -121,6 +122,7 @@ def build_composite(
     corridor_mask: ScalarImage,
     world_x: NDArray[np.float32] | None = None,
     world_y: NDArray[np.float32] | None = None,
+    glow: ScalarImage | None = None,
 ) -> ColorImage:
     """Build an RGB image from sofa and corridor mask arrays.
 
@@ -139,12 +141,38 @@ def build_composite(
         rgb = np.tile(FLOOR_TEXTURE, (*repeats, 1))[
             : sofa.shape[0], : sofa.shape[1]
         ].copy()
+    rgb = 0.78 * rgb + 0.08
 
     wall = corridor_mask == 0
     sofa_present = (corridor_mask == 1) & (sofa == 1)
+    sofa_eroded = np.asarray(
+        Image.fromarray(sofa_present.astype(np.uint8) * 255).filter(
+            ImageFilter.MinFilter(3)
+        )
+    ).astype(bool)
+    sofa_blur = Image.fromarray(sofa_present.astype(np.uint8) * 255).filter(
+        ImageFilter.GaussianBlur(min(sofa.shape) / 20)
+    )
+    sofa_shade = 0.55 + 0.45 * np.asarray(sofa_blur, dtype=np.float32) / 255.0
 
     rgb[wall] = DARK_GRAY
-    rgb[sofa_present] = STEEL_BLUE
+    if glow is not None:
+        glow_blur = Image.fromarray((np.minimum(glow, 1.0) * 255).astype(np.uint8))
+        glow_alpha = (
+            np.asarray(
+                glow_blur.filter(ImageFilter.MaxFilter(5)).filter(
+                    ImageFilter.GaussianBlur(min(sofa.shape) / 40)
+                ),
+                dtype=np.float32,
+            )
+            / 255.0
+            * 1.0
+        )
+        rgb[wall] = rgb[wall] * (1.0 - glow_alpha[wall][:, None]) + GLOW_ORANGE * (
+            glow_alpha[wall][:, None]
+        )
+    rgb[sofa_present] = STEEL_BLUE * sofa_shade[sofa_present][:, None]
+    rgb[sofa_present & ~sofa_eroded] = STEEL_BLUE * 0.45
     return rgb
 
 
@@ -261,6 +289,25 @@ def sample_image_in_extent(
     """Resample an image from one world-coordinate extent onto another."""
     world_x, world_y = _make_grid(target_extent, output_shape)
     return _sample_image_at_world_coords(image, source_extent, world_x, world_y)
+
+
+def _build_erosion_glow(
+    erosion_masks: Sequence[ScalarImage],
+    frame_idx: int,
+    erosion_peak: float,
+    sofa_extent: Extent,
+    target_extent: Extent,
+    output_shape: tuple[int, int],
+) -> ScalarImage:
+    glow = np.zeros(output_shape, dtype=np.float32)
+    if erosion_peak > 0.0:
+        for lag, decay in enumerate((1.0, 0.65, 0.38, 0.18)):
+            if frame_idx >= lag:
+                erosion = erosion_masks[frame_idx - lag]
+                glow += sample_image_in_extent(
+                    erosion, sofa_extent, target_extent, output_shape
+                ) * np.float32(decay * erosion.sum() / erosion_peak)
+    return glow
 
 
 def sample_sofa_in_corridor_frame(
@@ -433,7 +480,7 @@ def _write_streaming_gif(
 # ---------------------------------------------------------------------------
 
 
-PANEL_TARGET_SHORT_SIDE: int = 320
+PANEL_TARGET_SHORT_SIDE: int = 384
 
 
 def render_trajectory(
@@ -449,11 +496,26 @@ def render_trajectory(
     sofa_grid_shape = (frames[0].sofa.shape[0], frames[0].sofa.shape[1])
     left_pad_pixels = _default_left_pad_pixels(sofa_grid_shape)
     left_extent = expand_extent(sofa_extent, sofa_grid_shape, left_pad_pixels)
+    x_min, x_max, y_min, y_max = left_extent
+    side = max(x_max - x_min, y_max - y_min)
+    left_extent = (
+        0.5 * (x_min + x_max - side),
+        0.5 * (x_min + x_max + side),
+        0.5 * (y_min + y_max - side),
+        0.5 * (y_min + y_max + side),
+    )
     corridor_extent = compute_corridor_replay_extent(
         frames,
         frames[-1].sofa,
         sofa_extent,
         corridor_width,
+    )
+    x_min, x_max, y_min, y_max = corridor_extent
+    corridor_extent = (
+        0.80 * x_min + 0.20 * x_max,
+        0.20 * x_min + 0.80 * x_max,
+        0.80 * y_min + 0.20 * y_max,
+        0.20 * y_min + 0.80 * y_max,
     )
     rotated_corridor_extent = rotate_extent_counterclockwise(corridor_extent)
 
@@ -467,13 +529,11 @@ def render_trajectory(
     # Static right-panel corridor (doesn't change per frame)
     right_corridor = build_corridor_mask(corridor_extent, right_shape, corridor_width)
 
-    # Precompute world-coordinate grids for world-anchored floor texture.
-    # Left panel: sofa-local grid (transformed to world per frame using pose).
-    # Right panel: corridor-local grid (= world; static across frames).
+    # Floor texture is corridor-anchored; the left panel grid is transformed per frame.
     left_sx, left_sy = _make_grid(left_extent, left_shape)
     right_wx, right_wy = _make_grid(corridor_extent, right_shape)
 
-    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(13, 5.5))
+    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(13, 5.5), dpi=120)
 
     # Placeholder images — update(0) fills in real data immediately
     dummy = np.zeros((*left_shape, 3), dtype=np.float32)
@@ -481,10 +541,9 @@ def render_trajectory(
     dummy_rotated = np.zeros(rotated_shape, dtype=np.float32)
 
     left_artist = ax_left.imshow(
-        dummy, origin="lower", extent=left_extent, interpolation="nearest"
+        dummy, origin="lower", extent=left_extent, interpolation="bilinear"
     )
-    ax_left.set_xlabel("world x")
-    ax_left.set_ylabel("world y")
+    ax_left.set_axis_off()
     ax_left.set_aspect("equal")
     left_title = ax_left.set_title("", pad=TITLE_PAD)
 
@@ -492,16 +551,20 @@ def render_trajectory(
         dummy_rotated,
         origin="lower",
         extent=rotated_corridor_extent,
-        interpolation="nearest",
+        interpolation="bilinear",
     )
-    ax_right.set_xlabel("-corridor y")
-    ax_right.set_ylabel("corridor x")
+    ax_right.set_axis_off()
     ax_right.set_aspect("equal")
     right_title = ax_right.set_title("", pad=TITLE_PAD)
 
     fig.tight_layout(rect=(0.0, 0.0, 1.0, TOP_LAYOUT_MARGIN))
 
     final_sofa = frames[-1].sofa
+    erosion_masks = [np.zeros_like(frames[0].sofa)] + [
+        np.maximum(frames[idx - 1].sofa - frames[idx].sofa, 0.0).astype(np.float32)
+        for idx in range(1, len(frames))
+    ]
+    erosion_peak = max(float(mask.sum()) for mask in erosion_masks)
 
     def draw_frame(frame_idx: int) -> None:
         frame = frames[frame_idx]
@@ -518,20 +581,25 @@ def render_trajectory(
             left_shape,
             corridor_width,
         )
-        # Transform sofa-local grid to world coords so the texture is
-        # anchored to the world (stationary in corridor frame).
-        tx, ty, theta = frame.pose
-        cos_t = np.float32(np.cos(theta))
-        sin_t = np.float32(np.sin(theta))
-        lwx = (cos_t * left_sx - sin_t * left_sy + tx).astype(np.float32)
-        lwy = (sin_t * left_sx + cos_t * left_sy + ty).astype(np.float32)
+        left_cx, left_cy = _world_to_corridor_coords(left_sx, left_sy, frame.pose)
+        left_glow = _build_erosion_glow(
+            erosion_masks,
+            frame_idx,
+            erosion_peak,
+            sofa_extent,
+            left_extent,
+            left_shape,
+        )
         left_artist.set_data(
-            build_composite(left_sofa, left_corridor, world_x=lwx, world_y=lwy)
+            build_composite(
+                left_sofa,
+                left_corridor,
+                world_x=left_cx,
+                world_y=left_cy,
+                glow=left_glow,
+            )
         )
-        left_title.set_text(
-            f"Step {frame.step}: pose=({frame.pose[0]:.2f}, {frame.pose[1]:.2f}, {frame.pose[2]:.2f})\n"
-            "sofa frame"
-        )
+        left_title.set_text(f"Sofa frame - step {frame.step}")
 
         right_sofa = sample_sofa_in_corridor_frame(
             final_sofa,
@@ -547,9 +615,7 @@ def render_trajectory(
                 )
             )
         )
-        right_title.set_text(
-            f"Step {frame.step}.\n" f"Sofa area = {frames[-1].area:.3f}"
-        )
+        right_title.set_text(f"Corridor frame - area {frames[-1].area:.3f}")
 
     gif_path = output_path.with_suffix(".gif")
     with tqdm(total=len(frames), desc="Rendering", unit="frame") as pbar:
