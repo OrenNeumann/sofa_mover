@@ -127,7 +127,13 @@ def optimize_ppo_epochs(
     actor_head = actor_net.head
     critic_head = critic_net.head
 
-    last_stats: OptimizationStats | None = None
+    # Accumulate scalar stats on-GPU across all minibatches and materialize once
+    loss_pol_sum = torch.zeros((), device=device)
+    loss_crit_sum = torch.zeros((), device=device)
+    loss_ent_sum = torch.zeros((), device=device)
+    grad_norm_sum = torch.zeros((), device=device)
+    num_minibatches = (N + minibatch_size - 1) // minibatch_size
+    total_mbs = num_epochs * num_minibatches
 
     for _epoch in range(num_epochs):
         # Shuffle all tensors together with a single permutation.
@@ -173,19 +179,20 @@ def optimize_ppo_epochs(
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 itertools.chain(actor_net.parameters(), critic_net.head.parameters()),
                 max_grad_norm,
-            ).item()
-            optimizer.step()
-            last_stats = OptimizationStats(
-                loss_policy=loss_pol.item(),
-                loss_critic=loss_crit.item(),
-                loss_entropy=loss_ent.item(),
-                grad_norm=grad_norm,
             )
+            optimizer.step()
 
-    if last_stats is None:
-        raise RuntimeError("PPO optimization ran with zero minibatches.")
+            loss_pol_sum += loss_pol.detach()
+            loss_crit_sum += loss_crit.detach()
+            loss_ent_sum += loss_ent.detach()
+            grad_norm_sum += grad_norm  # no detach, already no grad_fn
 
-    return last_stats
+    return OptimizationStats(
+        loss_policy=(loss_pol_sum / total_mbs).item(),
+        loss_critic=(loss_crit_sum / total_mbs).item(),
+        loss_entropy=(loss_ent_sum / total_mbs).item(),
+        grad_norm=(grad_norm_sum / total_mbs).item(),
+    )
 
 
 def extract_episode_metrics(data_flat: TensorDictBase) -> EpisodeMetrics | None:

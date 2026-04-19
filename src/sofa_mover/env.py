@@ -127,10 +127,15 @@ class SofaEnv(EnvBase):
 
         init_pose = torch.tensor([list(cfg.initial_pose)], device=device)
         init_sofa = self.rasterizer.corridor_mask(init_pose)
+        assert (
+            init_sofa.all().item()
+        ), "Initial pose should place sofa fully inside the corridor"
         self.initial_area = init_sofa.sum() * self.cell_area
         init_com = _sofa_com(init_sofa, self.x_grid, self.y_grid)
         init_goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, init_pose)
         self.initial_goal_dist = (init_com - init_goal_sofa).norm(dim=-1)
+        # (3,) tensor broadcast into self._pose on reset.
+        self._initial_pose = init_pose.squeeze(0)
 
         # Internal state
         self._sofa = torch.ones(
@@ -224,7 +229,7 @@ class SofaEnv(EnvBase):
     def shaping_scale(self) -> float:
         return max(0.0, 1.0 - self.steps_count / self._anneal_end)
 
-    def _reset(self, tensordict: TensorDictBase) -> TensorDictBase:
+    def _reset(self, tensordict: TensorDictBase | None) -> TensorDictBase:
         B = self.num_envs
         device = self.device
 
@@ -234,26 +239,12 @@ class SofaEnv(EnvBase):
         else:
             reset_mask = torch.ones(B, dtype=torch.bool, device=device)
 
-        # Reset selected envs in internal state
-        n_reset = reset_mask.sum().item()
-        if n_reset > 0:
-            initial_pose = (
-                torch.tensor([list(self.cfg.initial_pose)], device=device)
-                .expand(n_reset, -1)
-                .contiguous()
-            )
-
-            h, w = self._sofa.shape[2], self._sofa.shape[3]
-            fresh_sofa = torch.ones(n_reset, 1, h, w, dtype=torch.bool, device=device)
-            assert self.rasterizer.corridor_mask(
-                initial_pose
-            ).all(), "Initial pose should place sofa fully inside the corridor"
-
-            self._sofa[reset_mask] = fresh_sofa
-            self._pose[reset_mask] = initial_pose
-            self._step_count[reset_mask] = 0
-            self._episode_total_angle[reset_mask] = 0.0
-            self._episode_total_distance[reset_mask] = 0.0
+        # Reset the selected envs
+        self._sofa[reset_mask] = True
+        self._pose[reset_mask] = self._initial_pose
+        self._step_count[reset_mask] = 0
+        self._episode_total_angle[reset_mask] = 0.0
+        self._episode_total_distance[reset_mask] = 0.0
 
         if self.cfg.observation_type == "boundary":
             # TODO: can we get rid of this op?
