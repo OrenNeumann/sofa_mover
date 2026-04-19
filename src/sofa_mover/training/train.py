@@ -30,7 +30,7 @@ stack = build_training_stack(config)
 normalizer: Normalizer = stack.normalizer
 
 # --- Training loop ---
-best_mean_area_at_goal = 0.0
+best_area_so_far = 0.0  # running max of episode/best_area_at_goal
 batch_idx = 0
 total_steps = 0
 training_start = time.perf_counter()
@@ -130,9 +130,9 @@ for data in stack.collector:
     # Save best
     if (
         episode_metrics is not None
-        and episode_metrics.area_at_goal > best_mean_area_at_goal
+        and episode_metrics.best_area_at_goal > best_area_so_far
     ):
-        best_mean_area_at_goal = episode_metrics.area_at_goal
+        best_area_so_far = episode_metrics.best_area_at_goal
         torch.save(
             {
                 "actor": dict(stack.actor.state_dict()),
@@ -140,7 +140,7 @@ for data in stack.collector:
                 "vec_normalize": normalizer.state_dict(),
                 "config": config,
                 "batch_idx": batch_idx,
-                "best_mean_area_at_goal": best_mean_area_at_goal,
+                "best_area_so_far": best_area_so_far,
             },
             output_path / "best_policy.pt",
         )
@@ -161,14 +161,13 @@ torch.save(
         "vec_normalize": normalizer.state_dict(),
         "config": config,
         "batch_idx": batch_idx,
-        "best_mean_area_at_goal": best_mean_area_at_goal,
+        "best_area_so_far": best_area_so_far,
     },
     final_path,
 )
-print(f"Training complete. Best mean area at goal: {best_mean_area_at_goal:.4f}")
+print(f"Training complete. Best area at goal: {best_area_so_far:.4f}")
 print(f"Saved to {final_path}")
-
-# Visualize the best policy (fall back to final if no best was saved)
+# Evaluate the best policy, fall back to final if no goal was ever reached
 best_path = output_path / "best_policy.pt"
 eval_path = best_path if best_path.exists() else final_path
 evaluate(

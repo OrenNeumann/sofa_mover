@@ -1,5 +1,13 @@
 # Sofa Mover
 
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![PyTorch](https://img.shields.io/badge/framework-PyTorch-ee4c2c)
+![Status](https://img.shields.io/badge/status-active%20development-yellow)
+
+A reinforcement learning environment for solving the Sofa-Moving Problem.
+
+
 ## Training
 
 ```bash

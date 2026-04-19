@@ -6,6 +6,7 @@ import torch
 
 from sofa_mover.training.config import GridConfig
 from sofa_mover.visualization.render import (
+    FLOOR_TEXTURE,
     FrameData,
     build_composite,
     build_corridor_mask,
@@ -79,7 +80,7 @@ class TestBuildComposite:
 
         rgb = build_composite(sofa, mask)
 
-        np.testing.assert_allclose(rgb[0, 0], [0.8, 0.8, 0.8])
+        np.testing.assert_allclose(rgb[0, 0], FLOOR_TEXTURE[0, 0])
 
     def test_sofa_color(self) -> None:
         sofa = np.ones((16, 16), dtype=np.float32)

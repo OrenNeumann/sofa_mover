@@ -25,11 +25,37 @@ ColorImage: TypeAlias = NDArray[np.float32]
 Extent = tuple[float, float, float, float]
 
 DARK_GRAY = np.array([0.2, 0.2, 0.2], dtype=np.float32)
-LIGHT_GRAY = np.array([0.8, 0.8, 0.8], dtype=np.float32)
 STEEL_BLUE = np.array([0.27, 0.47, 0.73], dtype=np.float32)
 LEFT_PAD_FRACTION = 0.08
 TITLE_PAD = 12.0
 TOP_LAYOUT_MARGIN = 0.90
+# World width spanned by one full repeat of the floor texture.
+FLOOR_TILE_WORLD_SIZE_X: float = 1.5
+# Aspect-preserving load of the parquet texture at moderate resolution.  The
+# shorter side is fixed so we get a well-filtered (Lanczos) downsample while
+# keeping horizontal/vertical detail proportional to the source.
+_FLOOR_TEXTURE_SHORT_SIDE: int = 192
+
+
+def _load_floor_texture() -> NDArray[np.float32]:
+    src = Image.open(
+        Path(__file__).resolve().parents[3] / "assets" / "parquet_3.png"
+    ).convert("RGB")
+    if src.width >= src.height:
+        tex_h = _FLOOR_TEXTURE_SHORT_SIDE
+        tex_w = round(_FLOOR_TEXTURE_SHORT_SIDE * src.width / src.height)
+    else:
+        tex_w = _FLOOR_TEXTURE_SHORT_SIDE
+        tex_h = round(_FLOOR_TEXTURE_SHORT_SIDE * src.height / src.width)
+    return (
+        np.asarray(src.resize((tex_w, tex_h), Image.LANCZOS), dtype=np.float32) / 255.0
+    )
+
+
+FLOOR_TEXTURE = _load_floor_texture()
+FLOOR_TILE_WORLD_SIZE_Y: float = (
+    FLOOR_TILE_WORLD_SIZE_X * FLOOR_TEXTURE.shape[0] / FLOOR_TEXTURE.shape[1]
+)
 
 
 @dataclass(frozen=True)
@@ -61,16 +87,63 @@ def compute_frame_data(
     )
 
 
-def build_composite(sofa: ScalarImage, corridor_mask: ScalarImage) -> ColorImage:
-    """Build an RGB image from sofa and corridor mask arrays."""
-    rgb = np.zeros((sofa.shape[0], sofa.shape[1], 3), dtype=np.float32)
+def _floor_from_world_coords(
+    world_x: NDArray[np.float32],
+    world_y: NDArray[np.float32],
+) -> ColorImage:
+    """Sample the floor texture at world-space coordinates using bilinear filtering.
+
+    Tiles the texture in world space with independent X/Y sizes so the image
+    aspect is preserved.  Bilinear blending between the four neighbouring
+    texels smooths the visible aliasing that nearest-neighbour lookup would
+    introduce when render pixel size differs from texel size.
+    """
+    tex_h, tex_w = FLOOR_TEXTURE.shape[:2]
+    fx = (world_x / FLOOR_TILE_WORLD_SIZE_X) % 1.0 * tex_w
+    fy = (world_y / FLOOR_TILE_WORLD_SIZE_Y) % 1.0 * tex_h
+    col0 = np.floor(fx).astype(np.int32) % tex_w
+    row0 = np.floor(fy).astype(np.int32) % tex_h
+    col1 = (col0 + 1) % tex_w
+    row1 = (row0 + 1) % tex_h
+    dx = (fx - np.floor(fx))[..., None].astype(np.float32)
+    dy = (fy - np.floor(fy))[..., None].astype(np.float32)
+    c00 = FLOOR_TEXTURE[row0, col0]
+    c01 = FLOOR_TEXTURE[row0, col1]
+    c10 = FLOOR_TEXTURE[row1, col0]
+    c11 = FLOOR_TEXTURE[row1, col1]
+    top = c00 * (1.0 - dx) + c01 * dx
+    bot = c10 * (1.0 - dx) + c11 * dx
+    return (top * (1.0 - dy) + bot * dy).astype(np.float32)
+
+
+def build_composite(
+    sofa: ScalarImage,
+    corridor_mask: ScalarImage,
+    world_x: NDArray[np.float32] | None = None,
+    world_y: NDArray[np.float32] | None = None,
+) -> ColorImage:
+    """Build an RGB image from sofa and corridor mask arrays.
+
+    When world_x/world_y are provided the floor texture is sampled at fixed
+    world-space coordinates so that tiles are correctly scaled and remain
+    stationary as the view moves.  Without them the texture is tiled in pixel
+    space (used for wandb image logging where no extent is available).
+    """
+    if world_x is not None and world_y is not None:
+        rgb = _floor_from_world_coords(world_x, world_y)
+    else:
+        repeats = tuple(
+            int(np.ceil(dim / tex_dim))
+            for dim, tex_dim in zip(sofa.shape, FLOOR_TEXTURE.shape[:2], strict=True)
+        )
+        rgb = np.tile(FLOOR_TEXTURE, (*repeats, 1))[
+            : sofa.shape[0], : sofa.shape[1]
+        ].copy()
 
     wall = corridor_mask == 0
-    corridor_empty = (corridor_mask == 1) & (sofa == 0)
     sofa_present = (corridor_mask == 1) & (sofa == 1)
 
     rgb[wall] = DARK_GRAY
-    rgb[corridor_empty] = LIGHT_GRAY
     rgb[sofa_present] = STEEL_BLUE
     return rgb
 
@@ -217,6 +290,22 @@ def _default_left_pad_pixels(shape: tuple[int, int]) -> int:
     return max(4, int(round(min(shape) * LEFT_PAD_FRACTION)))
 
 
+def _aspect_matched_shape(extent: Extent, target_short_side: int) -> tuple[int, int]:
+    """Return (rows, cols) at target_short_side px matching the extent's aspect."""
+    x_min, x_max, y_min, y_max = extent
+    width_world = x_max - x_min
+    height_world = y_max - y_min
+    if width_world <= 0 or height_world <= 0:
+        raise ValueError("Extent must have positive width and height.")
+    if width_world <= height_world:
+        cols = target_short_side
+        rows = max(1, round(target_short_side * height_world / width_world))
+    else:
+        rows = target_short_side
+        cols = max(1, round(target_short_side * width_world / height_world))
+    return (rows, cols)
+
+
 def _mask_bbox(mask: ScalarImage, extent: Extent) -> Extent:
     nonzero = np.argwhere(mask > 0)
     if nonzero.size == 0:
@@ -344,6 +433,9 @@ def _write_streaming_gif(
 # ---------------------------------------------------------------------------
 
 
+PANEL_TARGET_SHORT_SIDE: int = 320
+
+
 def render_trajectory(
     frames: Sequence[FrameData],
     output_path: Path,
@@ -354,9 +446,9 @@ def render_trajectory(
     """Render a sequence of frames into an animated gif."""
     if len(frames) == 0:
         raise ValueError("Cannot render an empty trajectory.")
-    render_shape = (frames[0].sofa.shape[0], frames[0].sofa.shape[1])
-    left_pad_pixels = _default_left_pad_pixels(render_shape)
-    left_extent = expand_extent(sofa_extent, render_shape, left_pad_pixels)
+    sofa_grid_shape = (frames[0].sofa.shape[0], frames[0].sofa.shape[1])
+    left_pad_pixels = _default_left_pad_pixels(sofa_grid_shape)
+    left_extent = expand_extent(sofa_extent, sofa_grid_shape, left_pad_pixels)
     corridor_extent = compute_corridor_replay_extent(
         frames,
         frames[-1].sofa,
@@ -365,17 +457,32 @@ def render_trajectory(
     )
     rotated_corridor_extent = rotate_extent_counterclockwise(corridor_extent)
 
+    # Per-panel render shapes chosen to match each extent's aspect ratio so
+    # world-space sampling (including the floor texture) is isotropic.  Using
+    # the sofa grid shape directly causes severe anisotropic streaks in the
+    # right panel because its extent has a very different aspect ratio.
+    left_shape = _aspect_matched_shape(left_extent, PANEL_TARGET_SHORT_SIDE)
+    right_shape = _aspect_matched_shape(corridor_extent, PANEL_TARGET_SHORT_SIDE)
+
     # Static right-panel corridor (doesn't change per frame)
-    right_corridor = build_corridor_mask(corridor_extent, render_shape, corridor_width)
+    right_corridor = build_corridor_mask(corridor_extent, right_shape, corridor_width)
+
+    # Precompute world-coordinate grids for world-anchored floor texture.
+    # Left panel: sofa-local grid (transformed to world per frame using pose).
+    # Right panel: corridor-local grid (= world; static across frames).
+    left_sx, left_sy = _make_grid(left_extent, left_shape)
+    right_wx, right_wy = _make_grid(corridor_extent, right_shape)
 
     fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(13, 5.5))
 
     # Placeholder images — update(0) fills in real data immediately
-    dummy = np.zeros((*render_shape, 3), dtype=np.float32)
-    rotated_shape = (render_shape[1], render_shape[0], 3)
+    dummy = np.zeros((*left_shape, 3), dtype=np.float32)
+    rotated_shape = (right_shape[1], right_shape[0], 3)
     dummy_rotated = np.zeros(rotated_shape, dtype=np.float32)
 
-    left_artist = ax_left.imshow(dummy, origin="lower", extent=left_extent)
+    left_artist = ax_left.imshow(
+        dummy, origin="lower", extent=left_extent, interpolation="nearest"
+    )
     ax_left.set_xlabel("world x")
     ax_left.set_ylabel("world y")
     ax_left.set_aspect("equal")
@@ -385,6 +492,7 @@ def render_trajectory(
         dummy_rotated,
         origin="lower",
         extent=rotated_corridor_extent,
+        interpolation="nearest",
     )
     ax_right.set_xlabel("-corridor y")
     ax_right.set_ylabel("corridor x")
@@ -402,15 +510,24 @@ def render_trajectory(
             frame.sofa,
             sofa_extent,
             left_extent,
-            render_shape,
+            left_shape,
         )
         left_corridor = build_world_corridor_mask(
             frame.pose,
             left_extent,
-            render_shape,
+            left_shape,
             corridor_width,
         )
-        left_artist.set_data(build_composite(left_sofa, left_corridor))
+        # Transform sofa-local grid to world coords so the texture is
+        # anchored to the world (stationary in corridor frame).
+        tx, ty, theta = frame.pose
+        cos_t = np.float32(np.cos(theta))
+        sin_t = np.float32(np.sin(theta))
+        lwx = (cos_t * left_sx - sin_t * left_sy + tx).astype(np.float32)
+        lwy = (sin_t * left_sx + cos_t * left_sy + ty).astype(np.float32)
+        left_artist.set_data(
+            build_composite(left_sofa, left_corridor, world_x=lwx, world_y=lwy)
+        )
         left_title.set_text(
             f"Step {frame.step}: pose=({frame.pose[0]:.2f}, {frame.pose[1]:.2f}, {frame.pose[2]:.2f})\n"
             "sofa frame"
@@ -421,10 +538,14 @@ def render_trajectory(
             frame.pose,
             sofa_extent,
             corridor_extent,
-            render_shape,
+            right_shape,
         )
         right_artist.set_data(
-            rotate_image_counterclockwise(build_composite(right_sofa, right_corridor))
+            rotate_image_counterclockwise(
+                build_composite(
+                    right_sofa, right_corridor, world_x=right_wx, world_y=right_wy
+                )
+            )
         )
         right_title.set_text(
             f"Step {frame.step}.\n" f"Sofa area = {frames[-1].area:.3f}"

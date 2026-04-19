@@ -337,9 +337,7 @@ class SofaEnv(EnvBase):
         self._step_count += 1
 
         # Done conditions
-        area_dead = (
-            area_after / self.initial_area.clamp(min=1e-8)
-        ) < cfg.min_area_fraction
+        area_dead = (area_after / self.initial_area) < cfg.min_area_fraction
         truncated = self._step_count.squeeze(1) >= cfg.max_steps
         terminated = goal_reached | area_dead
         done = terminated | truncated
@@ -347,9 +345,7 @@ class SofaEnv(EnvBase):
         # --- Reward ---
         area_lost = (area_before - area_after).clamp(min=0.0)  # (B,)
         # penalty for losing area fraction, normalized by initial_area
-        erosion_penalty = (
-            -cfg.lambda_erosion * area_lost / self.initial_area.clamp(min=1e-8)
-        )
+        erosion_penalty = -cfg.lambda_erosion * area_lost / self.initial_area
         # reward for getting closer to goal
         progress_bonus = (
             cfg.lambda_progress
@@ -358,10 +354,9 @@ class SofaEnv(EnvBase):
             * self.shaping_scale
         )
         # per-step area survival bonus: dense feedback about current area level
-        area_step_bonus = (
-            cfg.lambda_area_step * area_after / self.initial_area.clamp(min=1e-8)
-        )
-        terminal_bonus = goal_reached.float() * area_after**2
+        area_step_bonus = cfg.lambda_area_step * area_after / self.initial_area
+        # TODO: why does cubic reward work so well??
+        terminal_bonus = goal_reached.float() * area_after**3
         reward = (
             erosion_penalty + progress_bonus + area_step_bonus + terminal_bonus
         ).unsqueeze(1)

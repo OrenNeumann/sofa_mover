@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 
@@ -13,6 +14,7 @@ import matplotlib.pyplot as plt
 from sofa_mover.corridor import make_l_corridor
 from sofa_mover.rasterize import Rasterizer
 from sofa_mover.training.config import DEVICE, GridConfig, SOFA_CONFIG
+from sofa_mover.visualization.render import build_composite
 
 
 def main(
@@ -39,8 +41,26 @@ def main(
     template_view = large_rasterizer.corridor_mask(
         torch.tensor([[0.0, 0.0, 0.0]], device=device)
     )
+    _ov_xs = np.linspace(
+        -overview_config.world_size / 2,
+        overview_config.world_size / 2,
+        overview_config.grid_size,
+        dtype=np.float32,
+    )
+    _ov_ys = np.linspace(
+        -overview_config.world_size / 2,
+        overview_config.world_size / 2,
+        overview_config.grid_size,
+        dtype=np.float32,
+    )
+    _ov_wx, _ov_wy = np.meshgrid(_ov_xs, _ov_ys, indexing="xy")
     axes[0].imshow(
-        template_view[0, 0].cpu().numpy(),
+        build_composite(
+            np.zeros_like(template_view[0, 0].cpu().numpy()),
+            template_view[0, 0].cpu().numpy(),
+            world_x=_ov_wx,
+            world_y=_ov_wy,
+        ),
         origin="lower",
         extent=[
             -overview_config.world_size / 2,
@@ -48,19 +68,38 @@ def main(
             -overview_config.world_size / 2,
             overview_config.world_size / 2,
         ],
-        cmap="Greys_r",
     )
     axes[0].set_title("L-Corridor at identity (6x6 world units)")
     axes[0].set_xlabel("x")
     axes[0].set_ylabel("y")
     axes[0].set_aspect("equal")
 
+    # Precompute sofa-local world grid (pose = identity → world = sofa-local)
+    _s_xs = np.linspace(
+        -sofa_config.world_size / 2,
+        sofa_config.world_size / 2,
+        sofa_config.grid_size,
+        dtype=np.float32,
+    )
+    _s_ys = np.linspace(
+        -sofa_config.world_size / 2,
+        sofa_config.world_size / 2,
+        sofa_config.grid_size,
+        dtype=np.float32,
+    )
+    _s_wx, _s_wy = np.meshgrid(_s_xs, _s_ys, indexing="xy")
+
     # --- Panel 2: Mask at identity pose (sofa view) ---
     mask_identity = rasterizer.corridor_mask(
         torch.tensor([[0.0, 0.0, 0.0]], device=device)
     )
     axes[1].imshow(
-        mask_identity[0, 0].cpu().numpy(),
+        build_composite(
+            np.zeros_like(mask_identity[0, 0].cpu().numpy()),
+            mask_identity[0, 0].cpu().numpy(),
+            world_x=_s_wx,
+            world_y=_s_wy,
+        ),
         origin="lower",
         extent=[
             -sofa_config.world_size / 2,
@@ -68,7 +107,6 @@ def main(
             -sofa_config.world_size / 2,
             sofa_config.world_size / 2,
         ],
-        cmap="Greys_r",
     )
     axes[1].set_title("Corridor Mask at (0, 0, 0)\n(sofa's 3x3 view)")
     axes[1].set_xlabel("x")
@@ -79,8 +117,16 @@ def main(
     mask_rotated = rasterizer.corridor_mask(
         torch.tensor([[0.0, 0.0, math.pi / 4]], device=device)
     )
+    _cos_r, _sin_r = np.float32(np.cos(math.pi / 4)), np.float32(np.sin(math.pi / 4))
+    _r_wx = (_cos_r * _s_wx - _sin_r * _s_wy).astype(np.float32)
+    _r_wy = (_sin_r * _s_wx + _cos_r * _s_wy).astype(np.float32)
     axes[2].imshow(
-        mask_rotated[0, 0].cpu().numpy(),
+        build_composite(
+            np.zeros_like(mask_rotated[0, 0].cpu().numpy()),
+            mask_rotated[0, 0].cpu().numpy(),
+            world_x=_r_wx,
+            world_y=_r_wy,
+        ),
         origin="lower",
         extent=[
             -sofa_config.world_size / 2,
@@ -88,7 +134,6 @@ def main(
             -sofa_config.world_size / 2,
             sofa_config.world_size / 2,
         ],
-        cmap="Greys_r",
     )
     axes[2].set_title("Corridor Mask at (0, 0, π/4)\n(45° rotation)")
     axes[2].set_xlabel("x")
@@ -126,8 +171,18 @@ def main(
         area_world = area_pixels * (sofa_config.world_size / sofa_config.grid_size) ** 2
 
         px, py, pt = pose_vals
+        _cos_p, _sin_p = np.float32(np.cos(pt)), np.float32(np.sin(pt))
+        _p_wx = (_cos_p * _s_wx - _sin_p * _s_wy + px).astype(np.float32)
+        _p_wy = (_sin_p * _s_wx + _cos_p * _s_wy + py).astype(np.float32)
         axes2[i].imshow(
-            sofa[0, 0].cpu().numpy(), origin="lower", extent=extent, cmap="Blues"
+            build_composite(
+                sofa[0, 0].cpu().numpy(),
+                mask[0, 0].cpu().numpy(),
+                world_x=_p_wx,
+                world_y=_p_wy,
+            ),
+            origin="lower",
+            extent=extent,
         )
         axes2[i].set_title(
             f"Step {i}: pose=({px:.1f}, {py:.1f}, {pt:.2f})\narea={area_world:.2f}"
