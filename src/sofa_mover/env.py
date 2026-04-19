@@ -320,15 +320,16 @@ class SofaEnv(EnvBase):
         swept, corridor_at_next = self.rasterizer.swept_mask(
             pose, pose_next, cfg.num_substeps
         )
-        # Erosion: sofa ∩ corridor removes pixels outside the corridor
-        new_sofa = self._sofa & swept
+        # Erosion: sofa ∩ corridor. In-place is safe because every
+        # sofa_view returned by _step is a fresh tensor, not a view of self._sofa.
+        self._sofa &= swept
 
         # Area after erosion
         area_after = (
-            new_sofa.flatten(1).sum(dim=1, dtype=torch.float32) * self.cell_area
+            self._sofa.flatten(1).sum(dim=1, dtype=torch.float32) * self.cell_area
         )  # (B,)
         # Goal check: sofa COM close to goal point
-        com = _sofa_com(new_sofa, self.x_grid, self.y_grid)  # (B, 2)
+        com = _sofa_com(self._sofa, self.x_grid, self.y_grid)  # (B, 2)
         goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, pose_next)  # (B, 2)
         goal_dist = (com - goal_sofa).norm(dim=-1)  # (B,)
         goal_reached = goal_dist < cfg.goal_radius  # (B,)
@@ -363,14 +364,13 @@ class SofaEnv(EnvBase):
 
         # Update internal state
         self.steps_count += B
-        self._sofa = new_sofa
         self._pose = pose_next
         self._goal_dist = goal_dist
 
         if self.cfg.observation_type == "boundary":
-            sofa_view = self._boundary(new_sofa, corridor_at_next)
+            sofa_view = self._boundary(self._sofa, corridor_at_next)
         else:  # "grid"
-            sofa_view = self._downscale_obs(new_sofa.to(torch.uint8))
+            sofa_view = self._downscale_obs(self._sofa.to(torch.uint8))
 
         # Progress = 1 - (dist_to_goal / initial_dist)
         progress = 1.0 - goal_dist.unsqueeze(1) / self.initial_goal_dist
