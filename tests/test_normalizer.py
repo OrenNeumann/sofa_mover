@@ -4,12 +4,16 @@ from collections.abc import Generator
 
 import pytest
 import torch
-from tensordict import TensorDictBase  # type: ignore[import-untyped]
 from tensordict.nn import TensorDictModule  # type: ignore[import-untyped]
 
 from sofa_mover.env import SofaEnv, make_sofa_env
-from sofa_mover.networks import SofaActorNet, SofaBoundaryEncoder, SofaEncoder
+from sofa_mover.networks import (
+    SofaActorNet,
+    BoundaryEncoder,
+    SofaEncoder,
+)
 from sofa_mover.training.config import (
+    BoundaryEncoderType,
     GridConfig,
     ObservationType,
     SofaEnvConfig,
@@ -20,7 +24,7 @@ from sofa_mover.training.utils import (
     compute_gae_direct,
     optimize_ppo_epochs,
 )
-from sofa_mover.training.normalizer import Normalizer, RunningMeanStd
+from sofa_mover.training.normalizer import Normalizer, ObsGroupSpec, RunningMeanStd
 
 TEST_DEVICE = torch.device("cpu")
 TEST_SOFA = GridConfig(grid_size=32, world_size=3.0)
@@ -48,6 +52,7 @@ def _training_config(
     rollout_length: int = 4,
     num_epochs: int = 1,
     minibatch_size: int = 4,
+    boundary_encoder: BoundaryEncoderType = "mlp",
 ) -> TrainingConfig:
     return TrainingConfig(
         env=_test_cfg() if cfg is None else cfg,
@@ -56,6 +61,7 @@ def _training_config(
         rollout_length=rollout_length,
         num_epochs=num_epochs,
         minibatch_size=minibatch_size,
+        boundary_encoder=boundary_encoder,
         device=TEST_DEVICE,
     )
 
@@ -79,9 +85,9 @@ def _make_actor_module(
 ) -> TensorDictModule:
     n_bins = 2 * cfg.n_magnitude_levels + 1
     nvec = [n_bins, n_bins, n_bins]
-    encoder: SofaEncoder | SofaBoundaryEncoder
+    encoder: SofaEncoder | BoundaryEncoder
     if cfg.observation_type == "boundary":
-        encoder = SofaBoundaryEncoder(
+        encoder = BoundaryEncoder(
             n_rays=2 * cfg.boundary_rays,
             normalizer=normalizer,
         )
@@ -134,13 +140,6 @@ def _collect_reward_batch(
     return torch.stack(rewards, dim=1), torch.stack(done, dim=1)
 
 
-def _flatten_boundary_observation(td: TensorDictBase) -> torch.Tensor:
-    sofa_view = td["observation", "sofa_view"]
-    pose = td["observation", "pose"]
-    progress = td["observation", "progress"]
-    return torch.cat([sofa_view, pose, progress], dim=-1)
-
-
 @pytest.fixture
 def training_stack() -> Generator[TrainingStack, None, None]:
     stack = build_training_stack(_training_config())
@@ -179,8 +178,8 @@ class TestObservationNormalization:
             device=TEST_DEVICE,
         )
 
-        if normalizer._obs_rms is not None:
-            assert normalizer._obs_rms.mean.device == TEST_DEVICE
+        for rms in normalizer._obs_rms.values():
+            assert rms.mean.device == TEST_DEVICE
         if normalizer._ret_rms is not None:
             assert normalizer._ret_rms.mean.device == TEST_DEVICE
 
@@ -190,27 +189,39 @@ class TestObservationNormalization:
         td = env.reset()
         actor_module(td)
 
-        assert normalizer._obs_rms is not None
-        assert normalizer._obs_rms.count > 1e-4
+        assert normalizer._obs_rms["sofa_rays"].count > 1e-4
 
     def test_freeze_stops_observation_stat_updates(self) -> None:
         _cfg, env, normalizer, actor_module = _make_boundary_actor_stack()
 
         td = env.reset()
         actor_module(td)
-        assert normalizer._obs_rms is not None
-        count_before = normalizer._obs_rms.count
+        counts_before = {name: rms.count for name, rms in normalizer._obs_rms.items()}
 
         normalizer.freeze = True
         actor_module(td)
 
-        assert normalizer._obs_rms.count == pytest.approx(count_before)
+        for name, rms in normalizer._obs_rms.items():
+            assert rms.count == pytest.approx(counts_before[name])
 
-    def test_boundary_normalizer_matches_flat_observation_width(self) -> None:
-        cfg = _test_cfg(boundary_rays=BOUNDARY_RAYS)
-        normalizer = _make_normalizer(cfg)
-        assert normalizer._obs_rms is not None
-        assert normalizer._obs_rms.mean.shape == torch.Size([2 * BOUNDARY_RAYS + 4])
+    def test_tied_group_normalization_preserves_rotation(self) -> None:
+        """Tied stats (scalar mean/std) must produce rotation-equivariant
+        normalization — otherwise the circular-conv encoder's equivariance
+        is broken downstream of the normalizer."""
+        normalizer = Normalizer(
+            obs_groups=[ObsGroupSpec("rays", 16, tied=True)],
+            num_envs=1,
+            device=TEST_DEVICE,
+            norm_reward=False,
+        )
+        torch.manual_seed(0)
+        x = torch.randn(8, 16)
+        normalizer.normalize_group(x, "rays")
+        normalizer.freeze = True
+        shift = 3
+        orig = normalizer.normalize_group(x, "rays")
+        rolled = normalizer.normalize_group(x.roll(shift, dims=-1), "rays")
+        assert torch.allclose(rolled, orig.roll(shift, dims=-1))
 
     def test_grid_observation_normalization_is_disabled_with_warning(self) -> None:
         config = _training_config(
@@ -222,7 +233,7 @@ class TestObservationNormalization:
 
         stack.collector.shutdown()
         assert stack.normalizer.norm_obs is False
-        assert stack.normalizer._obs_rms is None
+        assert stack.normalizer._obs_rms == {}
 
 
 class TestRewardNormalization:
@@ -258,7 +269,6 @@ class TestStateAndIntegration:
 
         td = env.reset()
         actor_module(td)
-        flat_observation = _flatten_boundary_observation(td)
         state = normalizer.state_dict()
 
         normalizer.freeze = True
@@ -266,10 +276,19 @@ class TestStateAndIntegration:
         frozen.load_state_dict(state)
         frozen.freeze = True
 
-        normalized_original = normalizer.normalize_flat_observation(flat_observation)
-        normalized_loaded = frozen.normalize_flat_observation(flat_observation)
-
-        assert torch.allclose(normalized_original, normalized_loaded)
+        sofa_view = td["observation", "sofa_view"]
+        n = sofa_view.shape[-1] // 2
+        groups = {
+            "sofa_rays": sofa_view[..., :n],
+            "corridor_rays": sofa_view[..., n:],
+            "pose": td["observation", "pose"],
+            "progress": td["observation", "progress"],
+        }
+        for name, group in groups.items():
+            assert torch.allclose(
+                normalizer.normalize_group(group, name),
+                frozen.normalize_group(group, name),
+            )
 
     def test_training_stack_boundary_rollouts_and_normalized_ppo(
         self, training_stack: TrainingStack
@@ -279,8 +298,7 @@ class TestStateAndIntegration:
         raw_reward = data["next", "reward"].clone()
 
         assert data["observation", "sofa_view"].dtype == torch.float32
-        assert training_stack.normalizer._obs_rms is not None
-        assert training_stack.normalizer._obs_rms.count > 1e-4
+        assert training_stack.normalizer._obs_rms["sofa_rays"].count > 1e-4
 
         normalized_reward = training_stack.normalizer.normalize_rewards(
             data["next", "reward"], data["next", "done"]

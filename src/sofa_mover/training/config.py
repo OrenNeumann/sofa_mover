@@ -24,6 +24,7 @@ class GridConfig:
 DEVICE = torch.device("cuda")
 SOFA_CONFIG = GridConfig()
 ObservationType: TypeAlias = Literal["grid", "boundary"]
+BoundaryEncoderType: TypeAlias = Literal["mlp", "circular_conv"]
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,17 @@ class TrainingConfig:
     max_grad_norm: float = 0.5
     normalize_observation: bool = True
     normalize_reward: bool = True
+    boundary_encoder: BoundaryEncoderType = "circular_conv"
+    # Boundary-encoder architecture (ignored for grid observations).
+    boundary_mlp_width: int = 256
+    boundary_mlp_depth: int = 2
+    boundary_conv_channels: int = 16
+    boundary_conv_depth: int = 1
+    boundary_conv_kernel_size: int = 9
+    boundary_conv_stride: int = 4
+    # Actor/critic head architecture (shared structure, separate instances).
+    head_width: int = 128
+    head_depth: int = 1
     device: torch.device = DEVICE
     output_dir: str = "output"
     wandb_project: str = "sofa_mover"

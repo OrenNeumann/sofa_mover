@@ -1,7 +1,10 @@
-"""Shared running normalization for flat observations and rewards.
-Basically a PyTorch implementation of SB3's VecNormalize."""
+"""Shared running normalization for grouped observations and rewards.
+Basically a PyTorch implementation of SB3's VecNormalize, extended with a
+per-group schema so encoders that exploit a symmetry (e.g. rotation over
+rays) can tie stats across elements that share the symmetry."""
 
-from typing import TypedDict, cast
+from dataclasses import dataclass
+from typing import TypedDict
 import warnings
 
 import torch
@@ -9,10 +12,32 @@ import torch
 from sofa_mover.training.config import TrainingConfig
 
 
+@dataclass(frozen=True)
+class ObsGroupSpec:
+    """A named slice of the observation with its own normalization stats.
+
+    tied=False: one (mean, var) per element — standard per-feature normalization.
+    tied=True:  one scalar (mean, var) shared by all `size` elements. Use this
+                when elements are samples of the same underlying distribution
+                (e.g. radial rays under a rotation-equivariant encoder) so that
+                normalized outputs preserve the symmetry.
+    """
+
+    name: str
+    size: int
+    tied: bool = False
+
+
 class RunningMeanStdState(TypedDict):
     mean: torch.Tensor
     var: torch.Tensor
     count: float
+
+
+@dataclass
+class NormalizerState:
+    obs_rms: dict[str, RunningMeanStdState]
+    ret_rms: RunningMeanStdState | None
 
 
 # TODO: optimize for gpu torch tensors
@@ -31,7 +56,11 @@ class RunningMeanStd:
         self.count = 1e-4
 
     def update(self, batch: torch.Tensor) -> None:
-        """Update stats from a batch. Leading dims are treated as batch dims."""
+        """Update stats from a batch. Leading dims are treated as batch dims.
+
+        With a scalar stat (shape=()), the batch is flattened entirely so every
+        element contributes as one sample.
+        """
         flat = batch.reshape(-1, *self.mean.shape)
         batch_mean = flat.mean(dim=0)
         batch_var = flat.var(dim=0, correction=0)
@@ -69,17 +98,21 @@ class RunningMeanStd:
 
 
 class Normalizer:
-    """Shared running normalization for flat observations and rewards.
-    Based on SB3's VecNormalize."""
+    """Shared running normalization for grouped observations and rewards.
 
-    # TODO: for mypy, remove after refactor. also remove the asserts in this class.
-    _obs_rms: RunningMeanStd | None
+    Observations are split into named groups via `obs_groups`; each group owns
+    one RunningMeanStd (scalar if `tied`, vector otherwise). Encoders call
+    `normalize_group(x, name)` directly on the group tensors they already hold,
+    so there is no flat-layout contract between the normalizer and the encoders.
+    """
+
+    _obs_rms: dict[str, RunningMeanStd]
     _ret_rms: RunningMeanStd | None
     _returns: torch.Tensor | None
 
     def __init__(
         self,
-        obs_dim: int | None,
+        obs_groups: list[ObsGroupSpec],
         num_envs: int,
         device: torch.device,
         gamma: float = 0.99,
@@ -98,11 +131,12 @@ class Normalizer:
         self.norm_reward = norm_reward
         self.freeze = False
 
-        self._obs_rms = (
-            RunningMeanStd(shape=(cast(int, obs_dim),), device=device)
-            if self.norm_obs
-            else None
-        )
+        self._obs_rms = {}
+        if self.norm_obs:
+            for group in obs_groups:
+                shape: tuple[int, ...] = () if group.tied else (group.size,)
+                self._obs_rms[group.name] = RunningMeanStd(shape=shape, device=device)
+
         self._ret_rms = (
             RunningMeanStd(shape=(), device=device) if self.norm_reward else None
         )
@@ -119,15 +153,25 @@ class Normalizer:
         num_envs: int,
         device: torch.device | None = None,
     ) -> "Normalizer":
-        """Build a Normalizer from a TrainingConfig.
+        """Build a Normalizer with a schema matched to the encoder choice.
 
-        Handles obs_dim computation and disables obs normalization for grid mode.
+        For boundary observations the schema is
+        [sofa_rays, corridor_rays, pose, progress]; ray groups are tied iff the
+        encoder is rotation-equivariant (`circular_conv`). Grid observations
+        disable obs normalization (conv-path normalization isn't implemented).
         """
         env_cfg = config.env
         norm_obs = config.normalize_observation
-        obs_dim: int | None = None
+        obs_groups: list[ObsGroupSpec] = []
         if env_cfg.observation_type == "boundary":
-            obs_dim = 2 * env_cfg.boundary_rays + 3 + 1
+            tied_rays = config.boundary_encoder == "circular_conv"
+            n = env_cfg.boundary_rays
+            obs_groups = [
+                ObsGroupSpec("sofa_rays", n, tied=tied_rays),
+                ObsGroupSpec("corridor_rays", n, tied=tied_rays),
+                ObsGroupSpec("pose", 3),
+                ObsGroupSpec("progress", 1),
+            ]
         elif norm_obs:
             warnings.warn(
                 "Observation normalization is disabled for grid observations. "
@@ -137,7 +181,7 @@ class Normalizer:
             )
             norm_obs = False
         return cls(
-            obs_dim=obs_dim,
+            obs_groups=obs_groups,
             num_envs=num_envs,
             device=config.device if device is None else device,
             gamma=config.gamma,
@@ -145,19 +189,21 @@ class Normalizer:
             norm_reward=config.normalize_reward,
         )
 
-    def normalize_flat_observation(self, observation: torch.Tensor) -> torch.Tensor:
-        """Normalize a flat observation vector."""
-        if not self.norm_obs:
-            return observation
-        assert self._obs_rms is not None
+    def normalize_group(self, x: torch.Tensor, name: str) -> torch.Tensor:
+        """Normalize one observation group with its running stats.
 
+        `x` must have its last dim equal to the group's declared size; leading
+        dims are treated as batch. For tied groups, the scalar mean/std is
+        broadcast across the last dim, preserving any symmetry in `x`.
+        """
+        if not self.norm_obs:
+            return x
+        rms = self._obs_rms[name]
         if not self.freeze:
             with torch.no_grad():
-                self._obs_rms.update(observation)
-
-        mean = self._obs_rms.mean
-        std = self._obs_rms.var.sqrt().clamp(min=self.epsilon)
-        return ((observation - mean) / std).clamp(-self.clip_obs, self.clip_obs)
+                rms.update(x)
+        std = rms.var.sqrt().clamp(min=self.epsilon)
+        return ((x - rms.mean) / std).clamp(-self.clip_obs, self.clip_obs)
 
     def normalize_rewards(
         self, reward: torch.Tensor, done: torch.Tensor
@@ -171,7 +217,7 @@ class Normalizer:
         assert self._ret_rms is not None
         assert self._returns is not None
 
-        reward_seq = reward.squeeze(-1)  # (B, T)
+        reward_seq = reward.squeeze(-1)
         done_seq = done.squeeze(-1).bool()
 
         normalized = torch.empty_like(reward_seq)
@@ -187,16 +233,15 @@ class Normalizer:
             )
         return normalized.unsqueeze(-1)
 
-    def state_dict(self) -> dict[str, RunningMeanStdState]:
-        state: dict[str, RunningMeanStdState] = {}
-        if self._obs_rms is not None:
-            state["obs_rms"] = self._obs_rms.state_dict()
-        if self._ret_rms is not None:
-            state["ret_rms"] = self._ret_rms.state_dict()
-        return state
+    def state_dict(self) -> NormalizerState:
+        return NormalizerState(
+            obs_rms={name: rms.state_dict() for name, rms in self._obs_rms.items()},
+            ret_rms=self._ret_rms.state_dict() if self._ret_rms is not None else None,
+        )
 
-    def load_state_dict(self, state: dict[str, RunningMeanStdState]) -> None:
-        if self._obs_rms is not None:
-            self._obs_rms.load_state_dict(state["obs_rms"])
+    def load_state_dict(self, state: NormalizerState) -> None:
+        for name, rms in self._obs_rms.items():
+            rms.load_state_dict(state.obs_rms[name])
         if self._ret_rms is not None:
-            self._ret_rms.load_state_dict(state["ret_rms"])
+            assert state.ret_rms is not None
+            self._ret_rms.load_state_dict(state.ret_rms)

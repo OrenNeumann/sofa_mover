@@ -12,9 +12,8 @@ from sofa_mover.env import SofaEnv, make_sofa_env
 from sofa_mover.networks import (
     MultiDiscreteCategorical,
     SofaActorNet,
-    SofaBoundaryEncoder,
     SofaCriticNet,
-    SofaEncoder,
+    build_encoder,
 )
 from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.training.config import TrainingConfig
@@ -57,16 +56,18 @@ def build_training_stack(
     n_bins = 2 * env_cfg.n_magnitude_levels + 1
     nvec = [n_bins, n_bins, n_bins]
 
-    encoder: SofaEncoder | SofaBoundaryEncoder
-    if env_cfg.observation_type == "boundary":
-        encoder = SofaBoundaryEncoder(
-            n_rays=2 * env_cfg.boundary_rays,
-            normalizer=normalizer,
-        )
-    else:  # "grid"
-        encoder = SofaEncoder()
-    actor_net = SofaActorNet(nvec=nvec, encoder=encoder).to(device)
-    critic_net = SofaCriticNet(encoder=actor_net.encoder).to(device)
+    encoder = build_encoder(config, normalizer)
+    actor_net = SofaActorNet(
+        nvec=nvec,
+        encoder=encoder,
+        width=config.head_width,
+        depth=config.head_depth,
+    ).to(device)
+    critic_net = SofaCriticNet(
+        encoder=actor_net.encoder,
+        width=config.head_width,
+        depth=config.head_depth,
+    ).to(device)
 
     # Wrap actor for TorchRL
     actor_module = TensorDictModule(

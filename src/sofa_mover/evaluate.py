@@ -10,8 +10,7 @@ from sofa_mover.env import make_sofa_env
 from sofa_mover.networks import (
     MultiDiscreteCategorical,
     SofaActorNet,
-    SofaBoundaryEncoder,
-    SofaEncoder,
+    build_encoder,
 )
 from sofa_mover.training.config import DEVICE, TrainingConfig
 from sofa_mover.training.normalizer import Normalizer
@@ -53,15 +52,13 @@ def evaluate(
     n_bins = 2 * cfg.n_magnitude_levels + 1
     nvec = [n_bins, n_bins, n_bins]
 
-    encoder: SofaEncoder | SofaBoundaryEncoder
-    if cfg.observation_type == "boundary":
-        encoder = SofaBoundaryEncoder(
-            n_rays=2 * cfg.boundary_rays,
-            normalizer=normalizer,
-        )
-    else:
-        encoder = SofaEncoder()
-    actor_net = SofaActorNet(nvec=nvec, encoder=encoder).to(device)
+    encoder = build_encoder(training_config, normalizer)
+    actor_net = SofaActorNet(
+        nvec=nvec,
+        encoder=encoder,
+        width=training_config.head_width,
+        depth=training_config.head_depth,
+    ).to(device)
     actor_module = TensorDictModule(
         actor_net,
         in_keys=[
