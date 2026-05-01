@@ -71,14 +71,14 @@ class TrainingConfig:
 
     env: SofaEnvConfig = field(default_factory=SofaEnvConfig)
     num_envs: int = 512
-    total_frames: int = 6_000_000
+    total_frames: int = 8_000_000
     rollout_length: int = 64
     num_epochs: int = 4
     minibatch_size: int = 512
     lr: float = 3e-3
     lr_end_factor: float = 0.0
-    gamma: float = 0.99
-    gae_lambda: float = 0.95
+    gamma: float = 0.995
+    gae_lambda: float = 0.98
     clip_epsilon: float = 0.2
     entropy_coeff: float = 0.01
     critic_coeff: float = 1.0
@@ -90,7 +90,7 @@ class TrainingConfig:
     boundary_mlp_width: int = 256
     boundary_mlp_depth: int = 2
     boundary_conv_channels: int = 16
-    boundary_conv_depth: int = 1
+    boundary_conv_depth: int = 2
     boundary_conv_kernel_size: int = 9
     boundary_conv_stride: int = 4
     # Actor/critic head architecture (shared structure, separate instances).
