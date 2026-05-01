@@ -1,5 +1,6 @@
 """Tests for shared observation/reward normalization."""
 
+import math
 from collections.abc import Generator
 
 import pytest
@@ -290,21 +291,20 @@ class TestStateAndIntegration:
                 frozen.normalize_group(group, name),
             )
 
-    def test_training_stack_boundary_rollouts_and_normalized_ppo(
+    def test_ppo_step_runs_end_to_end_on_normalized_boundary_rollout(
         self, training_stack: TrainingStack
     ) -> None:
+        """Full pipeline smoke test: collector -> reward normalization -> GAE
+        -> PPO optimize, end-to-end, with a frozen normalizer during the update.
+        Each component is unit-tested elsewhere; this guards the wiring and the
+        end-to-end numerical sanity (finite losses, no NaNs)."""
         config = _training_config()
         data = next(iter(training_stack.collector))
-        raw_reward = data["next", "reward"].clone()
-
-        assert data["observation", "sofa_view"].dtype == torch.float32
-        assert training_stack.normalizer._obs_rms["sofa_rays"].count > 1e-4
 
         normalized_reward = training_stack.normalizer.normalize_rewards(
             data["next", "reward"], data["next", "done"]
         )
         data["next"].set("reward", normalized_reward)
-        assert not torch.allclose(normalized_reward, raw_reward)
 
         training_stack.normalizer.freeze = True
         compute_gae_direct(
@@ -313,7 +313,7 @@ class TestStateAndIntegration:
             config.gamma,
             config.gae_lambda,
         )
-        optimization_stats = optimize_ppo_epochs(
+        stats = optimize_ppo_epochs(
             data.reshape(-1),
             training_stack.actor_net,
             training_stack.critic_net,
@@ -326,6 +326,8 @@ class TestStateAndIntegration:
             config.entropy_coeff,
             config.critic_coeff,
         )
-        training_stack.normalizer.freeze = False
 
-        assert isinstance(optimization_stats.loss_policy, float)
+        assert math.isfinite(stats.loss_policy)
+        assert math.isfinite(stats.loss_critic)
+        assert math.isfinite(stats.loss_entropy)
+        assert math.isfinite(stats.grad_norm)

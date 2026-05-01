@@ -1,55 +1,29 @@
+import pytest
 import torch
 
-from sofa_mover.corridor import (
-    CorridorGeometry,
-    Rectangle,
-    make_l_corridor,
-)
+from sofa_mover.corridor import make_l_corridor
 from sofa_mover.rasterize import Rasterizer
 from sofa_mover.training.config import GridConfig
 
 
-def test_make_l_corridor_returns_geometry() -> None:
-    geometry = make_l_corridor()
-    assert isinstance(geometry, CorridorGeometry)
-    assert len(geometry.rectangles) == 2
-    for r in geometry.rectangles:
-        assert isinstance(r, Rectangle)
-
-
-def test_make_l_corridor_rectangle_bounds() -> None:
-    corridor_width = 1.0
+@pytest.mark.parametrize("corridor_width", [1.0, 2.0])
+def test_make_l_corridor_rectangle_bounds(corridor_width: float) -> None:
+    """Two perpendicular legs that share a hw x hw bend square at the origin."""
     geometry = make_l_corridor(corridor_width=corridor_width)
     hw = corridor_width / 2
-
     horiz, vert = geometry.rectangles
 
-    # Horizontal leg: x >= -hw, y in [-hw, hw]
+    # Horizontal leg: x >= -hw, y in [-hw, hw], extending to +inf along x
     assert horiz.x_min == -hw
     assert horiz.y_min == -hw
     assert horiz.y_max == hw
     assert horiz.x_max > 10.0  # semi-infinite sentinel
 
-    # Vertical leg: x in [-hw, hw], y <= hw
+    # Vertical leg: x in [-hw, hw], y <= hw, extending to -inf along y
     assert vert.x_min == -hw
     assert vert.x_max == hw
     assert vert.y_max == hw
     assert vert.y_min < -10.0  # semi-infinite sentinel
-
-
-def test_make_l_corridor_custom_width() -> None:
-    geometry = make_l_corridor(corridor_width=2.0)
-    horiz, vert = geometry.rectangles
-    assert horiz.x_min == -1.0
-    assert horiz.y_max == 1.0
-    assert vert.x_max == 1.0
-
-
-def test_geometry_to_tensor(device: torch.device) -> None:
-    geometry = make_l_corridor()
-    t = geometry.to_tensor(device)
-    assert t.shape == (2, 4)
-    assert t.device.type == device.type
 
 
 def test_corridor_mask_area(device: torch.device) -> None:

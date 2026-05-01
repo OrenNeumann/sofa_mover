@@ -34,16 +34,21 @@ def _n_bins(cfg: SofaEnvConfig | None = None) -> int:
     return 2 * cfg.n_magnitude_levels + 1
 
 
+def _action(B: int, n_bins: int, dx_idx: int, dy_idx: int, dt_idx: int) -> torch.Tensor:
+    """Concatenated one-hot for the (dx, dy, dtheta) bin indices."""
+    action = torch.zeros(B, 3 * n_bins, device=TEST_DEVICE)
+    action[:, dx_idx] = 1.0
+    action[:, n_bins + dy_idx] = 1.0
+    action[:, 2 * n_bins + dt_idx] = 1.0
+    return action
+
+
 def _noop_action(B: int, n_bins: int | None = None) -> torch.Tensor:
     """Concatenated one-hot with zero delta on all axes (center bin per axis)."""
     if n_bins is None:
         n_bins = _n_bins()
     mid = n_bins // 2
-    action = torch.zeros(B, 3 * n_bins, device=TEST_DEVICE)
-    action[:, mid] = 1.0  # dx = 0
-    action[:, n_bins + mid] = 1.0  # dy = 0
-    action[:, 2 * n_bins + mid] = 1.0  # dtheta = 0
-    return action
+    return _action(B, n_bins, mid, mid, mid)
 
 
 def _random_action(B: int, n_bins: int | None = None) -> torch.Tensor:
@@ -81,13 +86,13 @@ class TestReset:
         assert td["observation", "progress"].shape == (NUM_ENVS, 1)
         assert td["done"].shape == (NUM_ENVS, 1)
 
-    def test_sofa_is_carved(self, env) -> None:
-        env.reset()
-        sofa = env._sofa
-        H = env.cfg.sofa_config.grid_size
-        full_grid_pixels = NUM_ENVS * H * H
-        assert sofa.sum() < full_grid_pixels
-        assert sofa.sum() > 0
+    def test_sofa_is_fully_present_after_reset(self, env) -> None:
+        """The sofa grid is pre-cropped to the corridor's interior, so reset
+        starts with every pixel occupied. The grid-mode obs is a 1/0 mask of
+        the sofa state."""
+        td = env.reset()
+        obs = td["observation", "sofa_view"]
+        assert (obs == 1).all()
 
     def test_initial_progress_zero(self, env) -> None:
         td = env.reset()
@@ -98,9 +103,9 @@ class TestReset:
         )
 
     def test_initial_pose(self, env) -> None:
-        env.reset()
+        td = env.reset()
         expected = torch.tensor([list(env.cfg.initial_pose)], device=TEST_DEVICE)
-        assert torch.allclose(env._pose, expected.expand(NUM_ENVS, -1))
+        assert torch.allclose(td["observation", "pose"], expected.expand(NUM_ENVS, -1))
 
     def test_observation_single_channel_binary(self, env) -> None:
         td = env.reset()
@@ -121,23 +126,21 @@ class TestStep:
         assert td_next["done"].shape == (NUM_ENVS, 1)
         assert td_next["terminated"].shape == (NUM_ENVS, 1)
 
-    def test_noop_preserves_area(self, env) -> None:
+    def test_noop_causes_no_erosion(self, env) -> None:
+        """No movement => no area lost. reward_erosion is the public expression
+        of area_lost (= -lambda_erosion * area_lost / initial_area)."""
         td = env.reset()
-        area_before = env._sofa.sum().item()
         td["action"] = _noop_action(NUM_ENVS, env.n_bins)
-        env.step(td)
-        area_after = env._sofa.sum().item()
-        assert area_after == pytest.approx(area_before, rel=1e-5)
+        td_next = env.step(td)["next"]
+        assert (td_next["reward_erosion"] == 0).all()
 
-    def test_area_monotonically_decreases(self, env) -> None:
+    def test_area_never_increases(self, env) -> None:
+        """Erosion is monotonic: every step's reward_erosion is non-positive."""
         td = env.reset()
-        prev_area = env._sofa.sum().item()
         for _ in range(5):
             td["action"] = _random_action(NUM_ENVS, env.n_bins)
             td = env.step(td)["next"]
-            area = env._sofa.sum().item()
-            assert area <= prev_area + 1e-5
-            prev_area = area
+            assert (td["reward_erosion"] <= 0).all()
 
     def test_truncation_at_max_steps(self, env) -> None:
         td = env.reset()
@@ -172,13 +175,10 @@ class TestGoalDetection:
         )
         n_bins = env.n_bins
         mid = n_bins // 2
+        # dx=0, dy=most-negative, dtheta=most-positive
+        action = _action(1, n_bins, mid, 0, n_bins - 1)
         td = env.reset()
         for _ in range(100):
-            # dx=0, dy=-max_magnitude, dtheta=+max_magnitude
-            action = torch.zeros(1, 3 * n_bins, device=TEST_DEVICE)
-            action[0, mid] = 1.0  # dx = 0
-            action[0, n_bins + 0] = 1.0  # dy = most negative
-            action[0, 2 * n_bins + (n_bins - 1)] = 1.0  # dtheta = most positive
             td["action"] = action
             td = env.step(td)["next"]
             if td["done"].all():
@@ -196,14 +196,11 @@ class TestGoalDetection:
         )
         n_bins = env.n_bins
         mid = n_bins // 2
+        # dx=0, dy=-1 magnitude, dtheta=+1 magnitude
+        action = _action(1, n_bins, mid, mid - 1, mid + 1)
         td = env.reset()
         initial_progress = td["observation", "progress"][0].item()
-        # Move: dx=0, dy=-1 magnitude, dtheta=+1 magnitude
         for _ in range(5):
-            action = torch.zeros(1, 3 * n_bins, device=TEST_DEVICE)
-            action[0, mid] = 1.0  # dx = 0
-            action[0, n_bins + (mid - 1)] = 1.0  # dy = -1 magnitude
-            action[0, 2 * n_bins + (mid + 1)] = 1.0  # dtheta = +1 magnitude
             td["action"] = action
             td = env.step(td)["next"]
         assert td["observation", "progress"][0].item() > initial_progress
@@ -240,11 +237,8 @@ class TestEpisodeAccumulators:
         )
         n_bins = env.n_bins
         td = env.reset()
-        # Action: all axes at most-negative magnitude (dx, dy, dtheta all negative)
-        action = torch.zeros(1, 3 * n_bins, device=TEST_DEVICE)
-        action[0, 0] = 1.0  # dx = most negative
-        action[0, n_bins + 0] = 1.0  # dy = most negative
-        action[0, 2 * n_bins + 0] = 1.0  # dtheta = most negative
+        # All axes at most-negative magnitude (dx, dy, dtheta all negative)
+        action = _action(1, n_bins, 0, 0, 0)
         prev_dist = 0.0
         prev_angle = 0.0
         for _ in range(3):
@@ -267,11 +261,8 @@ class TestEpisodeAccumulators:
         )
         n_bins = env.n_bins
         td = env.reset()
-        # Run to truncation with non-noop actions
-        action = torch.zeros(1, 3 * n_bins, device=TEST_DEVICE)
-        action[0, 0] = 1.0
-        action[0, n_bins + 0] = 1.0
-        action[0, 2 * n_bins + 0] = 1.0
+        # Run to truncation with non-noop actions (all axes most negative)
+        action = _action(1, n_bins, 0, 0, 0)
         for _ in range(3):
             td["action"] = action
             td = env.step(td)["next"]
@@ -320,20 +311,26 @@ class TestEpisodeAccumulators:
 
 
 class TestObsModes:
-    def test_downscale(self) -> None:
-        cfg = _test_cfg(obs_downscale=2)
-        env = make_sofa_env(
+    def test_downscale_halves_obs_spatial_dims(self) -> None:
+        """obs_downscale=k must produce sofa_view spatial dims k× smaller than
+        the un-downscaled baseline."""
+        env_full = make_sofa_env(
             total_frames=TEST_TOTAL_FRAMES,
             num_envs=1,
-            cfg=cfg,
+            cfg=_test_cfg(obs_downscale=1),
             device=TEST_DEVICE,
         )
-        td = env.reset()
-        obs = td["observation", "sofa_view"]
-        assert obs.shape[1] == 1
-        # Downscaled: each dim halved from sofa grid
-        assert obs.shape[2] == env._sofa.shape[2] // 2
-        assert obs.shape[3] == env._sofa.shape[3] // 2
+        env_half = make_sofa_env(
+            total_frames=TEST_TOTAL_FRAMES,
+            num_envs=1,
+            cfg=_test_cfg(obs_downscale=2),
+            device=TEST_DEVICE,
+        )
+        full = env_full.reset()["observation", "sofa_view"]
+        half = env_half.reset()["observation", "sofa_view"]
+        assert half.shape[1] == 1
+        assert half.shape[2] == full.shape[2] // 2
+        assert half.shape[3] == full.shape[3] // 2
 
     def test_boundary_mode(self) -> None:
         cfg = _test_cfg(observation_type="boundary", boundary_rays=64)
