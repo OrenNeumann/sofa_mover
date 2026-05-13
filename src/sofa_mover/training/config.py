@@ -36,7 +36,7 @@ class SofaEnvConfig:
     delta_xy: float = 0.05 / 3
     delta_theta: float = math.pi / (60 * 3)
     max_steps: int = 300
-    num_substeps: int = 4
+    num_substeps: int = 10
     lambda_erosion: float = 0.5
     lambda_progress: float = 1.0
     min_area_fraction: float = 0.05
@@ -62,7 +62,7 @@ class SofaEnvConfig:
     # MultiDiscrete action space: number of non-zero magnitude levels per axis.
     # Each axis gets 2*n_magnitude_levels+1 bins: {-n·δ, ..., -δ, 0, +δ, ..., +n·δ}.
     # Actions are sampled independently per axis (dx, dy, dθ).
-    n_magnitude_levels: int = 3
+    n_magnitude_levels: int = 7
 
 
 @dataclass(frozen=True)
@@ -80,7 +80,7 @@ class TrainingConfig:
     gamma: float = 0.995
     gae_lambda: float = 0.98
     clip_epsilon: float = 0.2
-    entropy_coeff: float = 0.01
+    entropy_coeff: float = 0.008
     critic_coeff: float = 1.0
     max_grad_norm: float = 0.5
     normalize_observation: bool = True

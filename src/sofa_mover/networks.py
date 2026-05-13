@@ -27,6 +27,8 @@ class SofaPolicyEncoder(Protocol):
         progress: Tensor,
     ) -> Tensor: ...
 
+    def state_dict(self) -> dict[str, Tensor]: ...
+
 
 class MultiDiscreteCategorical(torch.distributions.Distribution):
     """Independent Categoricals over a concatenated one-hot action vector.

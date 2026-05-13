@@ -16,6 +16,7 @@ dependencies = [
     "tqdm>=4.67.3",
     "rich>=14.3.3",
     "wandb>=0.21.1",
+    "setuptools>=80.10.2",
 ]
 
 [dependency-groups]

@@ -51,6 +51,6 @@ class BoundaryExtractor:
             combined, grid, mode="nearest", padding_mode="zeros", align_corners=True
         )  # (B, 2, N, M)
         # fmt: on
-        # Count consecutive 1s from center along each ray
-        rays = samples.cumprod(dim=-1).sum(dim=-1) / self._n_samples  # (B, 2, N)
+        # Total mass per ray, normalized.
+        rays = samples.sum(dim=-1) / self._n_samples  # (B, 2, N)
         return rays.flatten(1)  # (B, 2*N)
