@@ -80,6 +80,9 @@ class TrainingConfig:
     gamma: float = 0.995
     gae_lambda: float = 0.98
     clip_epsilon: float = 0.2
+    # PPO KL early-stopping target. If not None, abort remaining PPO epochs once
+    # the mean per-epoch approx-KL exceeds this threshold.
+    target_kl: float | None = 0.03
     entropy_coeff: float = 0.008
     critic_coeff: float = 1.0
     max_grad_norm: float = 0.5

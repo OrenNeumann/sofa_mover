@@ -101,6 +101,7 @@ def main() -> None:
             config.clip_epsilon,
             config.entropy_coeff,
             config.critic_coeff,
+            target_kl=config.target_kl,
         )
         normalizer.freeze = False
         stack.lr_scheduler.step()
@@ -125,6 +126,9 @@ def main() -> None:
             "loss/critic": optimization_stats.loss_critic,
             "loss/entropy": optimization_stats.loss_entropy,
             "train/grad_norm": optimization_stats.grad_norm,
+            "train/approx_kl": optimization_stats.approx_kl,
+            "train/clip_fraction": optimization_stats.clip_fraction,
+            "train/ppo_epochs_completed": optimization_stats.epochs_completed,
             "train/lr": float(stack.lr_scheduler.get_last_lr()[0]),
         }
 

@@ -26,6 +26,9 @@ class OptimizationStats:
     loss_critic: float
     loss_entropy: float
     grad_norm: float
+    approx_kl: float
+    clip_fraction: float
+    epochs_completed: int
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,7 @@ def optimize_ppo_epochs(
     clip_epsilon: float,
     entropy_coeff: float,
     critic_coeff: float,
+    target_kl: float | None = None,
 ) -> OptimizationStats:
     """Run PPO minibatch optimization with direct tensor ops.
 
@@ -121,6 +125,10 @@ def optimize_ppo_epochs(
     action = data_flat["action"]
     old_log_prob = data_flat[_SAMPLE_LOG_PROB_KEY]
     advantage = data_flat[_ADV_KEY]
+    # Per-batch advantage normalization — standard PPO recipe. Reduces gradient
+    # magnitude on outlier batches where a few transitions have huge advantages
+    # (e.g. first goal-reaches with the cubic terminal reward).
+    advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
     value_target = data_flat[_VT_KEY]
 
     encoder = actor_net.encoder
@@ -132,10 +140,17 @@ def optimize_ppo_epochs(
     loss_crit_sum = torch.zeros((), device=device)
     loss_ent_sum = torch.zeros((), device=device)
     grad_norm_sum = torch.zeros((), device=device)
+    approx_kl_sum = torch.zeros((), device=device)
+    clip_frac_sum = torch.zeros((), device=device)
     num_minibatches = (N + minibatch_size - 1) // minibatch_size
-    total_mbs = num_epochs * num_minibatches
+    mbs_done = 0
+    epochs_done = 0
+    # Per-epoch KL accumulator on GPU; used for early stopping check (one .item() per epoch).
+    epoch_kl_sum = torch.zeros((), device=device)
 
+    break_outer = False
     for _epoch in range(num_epochs):
+        epoch_kl_sum.zero_()
         # Shuffle all tensors together with a single permutation.
         perm = torch.randperm(N, device=device)
         sv_s = sv[perm]
@@ -163,7 +178,12 @@ def optimize_ppo_epochs(
 
             values = critic_head(features).squeeze(-1)
 
-            ratio = torch.exp(new_log_prob - olp_s[mb_start:mb_end].squeeze(-1))
+            log_ratio = new_log_prob - olp_s[mb_start:mb_end].squeeze(-1)
+            ratio = torch.exp(log_ratio)
+            # Schulman's k3 approx-KL estimator: E[(r-1) - log r], unbiased + non-negative.
+            with torch.no_grad():
+                approx_kl_mb = ((ratio - 1.0) - log_ratio).mean()
+                clip_frac_mb = (ratio - 1.0).abs().gt(clip_epsilon).float().mean()
             adv_mb = adv_s[mb_start:mb_end].squeeze(-1)
             surr1 = ratio * adv_mb
             surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * adv_mb
@@ -186,12 +206,38 @@ def optimize_ppo_epochs(
             loss_crit_sum += loss_crit.detach()
             loss_ent_sum += loss_ent.detach()
             grad_norm_sum += grad_norm  # no detach, already no grad_fn
+            approx_kl_sum += approx_kl_mb
+            clip_frac_sum += clip_frac_mb
+            epoch_kl_sum += approx_kl_mb
+            mbs_done += 1
+
+            # Per-minibatch hard KL early stop: a single batch with extreme
+            # advantage spikes can blow up approx_kl > 1 within one epoch
+            # (cubic terminal reward in this env). Catch that immediately.
+            # Threshold is 4× target_kl: tolerates normal drift, kills outliers.
+            if target_kl is not None and approx_kl_mb.item() > 4.0 * target_kl:
+                break_outer = True
+                break
+
+        epochs_done += 1
+        if break_outer:
+            break
+        # KL early stopping: break out of the epoch loop if mean KL this epoch
+        # exceeds target. One device->host sync per epoch (cheap relative to the
+        # backward passes inside the loop).
+        if target_kl is not None:
+            epoch_kl = (epoch_kl_sum / num_minibatches).item()
+            if epoch_kl > target_kl:
+                break
 
     return OptimizationStats(
-        loss_policy=(loss_pol_sum / total_mbs).item(),
-        loss_critic=(loss_crit_sum / total_mbs).item(),
-        loss_entropy=(loss_ent_sum / total_mbs).item(),
-        grad_norm=(grad_norm_sum / total_mbs).item(),
+        loss_policy=(loss_pol_sum / mbs_done).item(),
+        loss_critic=(loss_crit_sum / mbs_done).item(),
+        loss_entropy=(loss_ent_sum / mbs_done).item(),
+        grad_norm=(grad_norm_sum / mbs_done).item(),
+        approx_kl=(approx_kl_sum / mbs_done).item(),
+        clip_fraction=(clip_frac_sum / mbs_done).item(),
+        epochs_completed=epochs_done,
     )
 
 
