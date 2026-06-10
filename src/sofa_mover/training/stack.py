@@ -106,12 +106,17 @@ def build_training_stack(
         lr=config.lr,
         fused=True,
     )
-    total_batches = config.total_frames // (num_envs * config.rollout_length)
+    anneal_frames = (
+        config.lr_anneal_frames
+        if config.lr_anneal_frames is not None
+        else config.total_frames
+    )
+    anneal_batches = anneal_frames // (num_envs * config.rollout_length)
     lr_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1.0,
         end_factor=config.lr_end_factor,
-        total_iters=total_batches,
+        total_iters=anneal_batches,
     )
 
     # --- Collector ---

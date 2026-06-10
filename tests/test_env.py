@@ -294,9 +294,8 @@ class TestEpisodeAccumulators:
         assert td["terminal_area"][0].item() == 0.0
 
     def test_terminal_area_nonzero_on_goal(self) -> None:
-        """terminal_area should be positive when the goal is reached."""
-        # goal_radius=10 guarantees immediate goal reach on first step
-        cfg = _test_cfg(goal_radius=10.0)
+        """terminal_area reports the episode's best area-at-goal when it ends."""
+        cfg = _test_cfg(goal_radius=10.0, max_steps=1)
         env = make_sofa_env(
             total_frames=TEST_TOTAL_FRAMES,
             num_envs=1,
@@ -306,7 +305,9 @@ class TestEpisodeAccumulators:
         td = env.reset()
         td["action"] = _noop_action(1, env.n_bins)
         td = env.step(td)["next"]
-        assert td["terminated"].all()
+        assert td["done"].all()
+        assert td["truncated"].all()
+        assert not td["terminated"].any()
         assert td["terminal_area"][0].item() > 0.0
 
 

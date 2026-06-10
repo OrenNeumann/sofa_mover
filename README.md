@@ -33,6 +33,25 @@ uv run python -c "from sofa_mover.evaluate import evaluate; evaluate('output/fin
 ```
 
 
+## Post-training trajectory optimization
+
+The trained discrete-action policy snaps to a coarse action grid, leaving easy
+local improvements on the table. After training finishes, the best trajectory
+recorded during training is refined with the Cross-Entropy Method (CEM) over
+continuous `(dx, dy, dθ)` deltas, then rendered to `output/optimized_trajectory.gif`.
+
+To run the optimization manually against a saved checkpoint:
+
+```bash
+uv run python -m sofa_mover.optimize_trajectory \
+    --checkpoint output/best_policy.pt \
+    --output output/optimized_trajectory.gif \
+    --iters 600 --pop-size 128
+```
+
+The script also exposes `optimize_trajectory(...)` / `optimize_from_checkpoint(...)`
+in `sofa_mover.optimize_trajectory` for programmatic use.
+
 ## Profiling
 
 To generate a flame graph for the default training run:
