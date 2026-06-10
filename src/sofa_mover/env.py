@@ -48,9 +48,11 @@ class SofaEnv(EnvBase):
     the corridor's incremental movement, and everything outside the corridor
     is permanently eroded from the sofa.
 
-    Done when the sofa's center of mass is within goal_radius of the
-    goal point, or when sofa area drops below min_area_fraction, or at
-    max steps.
+    An episode terminates when the sofa's area drops below min_area_fraction
+    of the initial area, and truncates at max_steps. Reaching the goal does
+    not end the episode; the area the sofa had when it first came within
+    goal_radius of the goal (zero if it never did) is paid as a terminal
+    reward at episode end.
     """
 
     batch_locked = True
@@ -69,9 +71,9 @@ class SofaEnv(EnvBase):
         self._anneal_end = total_frames * cfg.reward_anneal_time
 
         # MultiDiscrete action space: each of (dx, dy, dθ) is chosen independently
-        # from n_bins = 2*n_magnitude_levels+1 options: {-n·δ, …, 0, …, +n·δ}.
+        # from n_bins options: {-n·δ, …, 0, …, +n·δ}.
         n_mag = cfg.n_magnitude_levels
-        n_bins = 2 * n_mag + 1
+        n_bins = cfg.n_bins
         self.n_bins = n_bins
         # Build as [-n·δ, ..., -δ, 0, +δ, ..., +n·δ] with exact 0 at center.
         xy_pos = (
@@ -97,14 +99,25 @@ class SofaEnv(EnvBase):
         ppu = cfg.sofa_config.pixels_per_unit
         grid_w = round(cfg.corridor_width * ppu)
         grid_h = round(cfg.sofa_length * ppu)
-        self.cell_area = (1.0 / ppu) ** 2
+        # Pixel-center grid that exactly tiles the sofa rectangle:
+        spacing_x = cfg.corridor_width / grid_w
+        spacing_y = cfg.sofa_length / grid_h
+        self.cell_area = spacing_x * spacing_y
 
         hw = cfg.corridor_width / 2
         front_y = cfg.start_y_max
         back_y = front_y - cfg.sofa_length
 
-        x_coords = torch.linspace(-hw, hw, grid_w, device=device)
-        y_coords = torch.linspace(back_y, front_y, grid_h, device=device)
+        x_coords = (
+            -hw
+            + (torch.arange(grid_w, dtype=torch.float32, device=device) + 0.5)
+            * spacing_x
+        )
+        y_coords = (
+            back_y
+            + (torch.arange(grid_h, dtype=torch.float32, device=device) + 0.5)
+            * spacing_y
+        )
         self.y_grid, self.x_grid = torch.meshgrid(y_coords, x_coords, indexing="ij")
 
         # Build corridor geometry and rasterizer (with the sofa's cropped grid)
@@ -147,9 +160,10 @@ class SofaEnv(EnvBase):
         # Episode metric accumulators (reset per episode)
         self._episode_total_angle = torch.zeros(num_envs, 1, device=device)
         self._episode_total_distance = torch.zeros(num_envs, 1, device=device)
-        # Per-episode running max of (area_after when COM is inside the goal radius).
-        # Lets the agent be rewarded for the best moment of the trajectory, not
-        # the first goal-touch — matching the CEM-optimizer's fitness.
+        # Per-episode running max of (area_after when COM is inside the goal
+        # radius). Since erosion only shrinks the sofa, this equals the area at
+        # the first goal-touch; the running max is the branchless batched way
+        # to record it. Same fitness as the CEM optimizer's.
         self._episode_best_area_at_goal = torch.zeros(num_envs, 1, device=device)
 
         # Boundary ray-casting setup (if enabled)
@@ -157,6 +171,12 @@ class SofaEnv(EnvBase):
             self._boundary = BoundaryExtractor(
                 cfg.boundary_rays, init_sofa[0, 0], device
             )
+            # A freshly reset env always observes the same thing.
+            # Precomputed once, _reset only expands it across the batch.
+            self._reset_sofa_view = self._boundary(init_sofa, init_sofa)
+        else:  # "grid"
+            self._reset_sofa_view = self._downscale_obs(init_sofa.to(torch.uint8))
+        self._goal_dist = self.initial_goal_dist.expand(num_envs).clone()
 
         self._make_specs()
 
@@ -250,19 +270,11 @@ class SofaEnv(EnvBase):
         self._episode_total_angle[reset_mask] = 0.0
         self._episode_total_distance[reset_mask] = 0.0
         self._episode_best_area_at_goal[reset_mask] = 0.0
+        self._goal_dist[reset_mask] = self.initial_goal_dist
 
-        if self.cfg.observation_type == "boundary":
-            # TODO: can we get rid of this op?
-            corridor = self.rasterizer.corridor_mask(self._pose)
-            sofa_view = self._boundary(self._sofa, corridor)
-        else:  # "grid"
-            sofa_view = self._downscale_obs(self._sofa.to(torch.uint8))
-
-        # Progress = 1 - (dist_to_goal / initial_dist)
-        com = _sofa_com(self._sofa, self.x_grid, self.y_grid)
-        goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, self._pose)
-        self._goal_dist = (com - goal_sofa).norm(dim=-1)  # (B,)
-        progress = 1.0 - self._goal_dist.unsqueeze(1) / self.initial_goal_dist
+        # Expand the reset obs across the batch, TorchRL keeps only the reset rows.
+        sofa_view = self._reset_sofa_view.expand(B, *self._reset_sofa_view.shape[1:])
+        progress = torch.zeros(B, 1, device=device)
 
         return TensorDict(
             {
@@ -340,8 +352,8 @@ class SofaEnv(EnvBase):
         # Step count
         self._step_count += 1
 
-        # Done conditions — first goal-touch no longer terminates; the agent
-        # gets the full max_steps to find the best moment inside the goal radius.
+        # Done conditions — reaching the goal does not terminate; episodes end
+        # only on area death or truncation.
         area_dead = (area_after / self.initial_area) < cfg.min_area_fraction
         truncated = self._step_count.squeeze(1) >= cfg.max_steps
         terminated = area_dead

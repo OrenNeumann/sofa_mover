@@ -26,7 +26,14 @@ def main(
 
     geometry = make_l_corridor()
     rasterizer = Rasterizer(geometry, sofa_config, device=device)
-    sofa = torch.ones(1, 1, sofa_config.grid_size, sofa_config.grid_size, device=device)
+    sofa = torch.ones(
+        1,
+        1,
+        sofa_config.grid_size,
+        sofa_config.grid_size,
+        dtype=torch.bool,
+        device=device,
+    )
 
     # --- Figure 1: Corridor masks at various poses ---
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -176,8 +183,8 @@ def main(
         _p_wy = (_sin_p * _s_wx + _cos_p * _s_wy + py).astype(np.float32)
         axes2[i].imshow(
             build_composite(
-                sofa[0, 0].cpu().numpy(),
-                mask[0, 0].cpu().numpy(),
+                sofa[0, 0].float().cpu().numpy(),
+                mask[0, 0].float().cpu().numpy(),
                 world_x=_p_wx,
                 world_y=_p_wy,
             ),

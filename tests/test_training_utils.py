@@ -1,15 +1,77 @@
+from typing import cast
+
 import pytest
 import torch
 from tensordict import TensorDict
 
 from sofa_mover.env import make_sofa_env
+from sofa_mover.networks import SofaCriticNet
 from sofa_mover.training.config import SofaEnvConfig
 from sofa_mover.training.utils import (
+    compute_gae_direct,
     extract_episode_metrics,
     maybe_build_episode_composite,
 )
 
 TEST_TOTAL_FRAMES = 1_000_000
+
+
+class _PlantedValueCritic(torch.nn.Module):
+    """Critic stub that reads back the value planted in sofa_view."""
+
+    def forward(
+        self, sofa_view: torch.Tensor, pose: torch.Tensor, progress: torch.Tensor
+    ) -> torch.Tensor:
+        return sofa_view[:, :1]
+
+
+def _obs(values: list[float]) -> TensorDict:
+    return TensorDict(
+        {
+            "sofa_view": torch.tensor(values).reshape(1, 3, 1),
+            "pose": torch.zeros(1, 3, 3),
+            "progress": torch.zeros(1, 3, 1),
+        },
+        batch_size=(1, 3),
+    )
+
+
+# Hand-computed with v=[1,2,3], v'=[2,3,4], r=1, γ=λ=0.5, episode ending at t=2:
+# delta_t = r + γ·(1-term_t)·v'_t - v_t;  A_t = delta_t + γλ·(1-done_t)·A_{t+1}
+@pytest.mark.parametrize(
+    "terminated, expected_adv",
+    [
+        (True, [1.0, 0.0, -2.0]),  # terminal: v' masked at the final step
+        (False, [1.125, 0.5, 0.0]),  # truncated: v' still bootstrapped
+    ],
+)
+def test_compute_gae_direct(terminated: bool, expected_adv: list[float]) -> None:
+    data = TensorDict(
+        {
+            "observation": _obs([1.0, 2.0, 3.0]),
+            "next": TensorDict(
+                {
+                    "observation": _obs([2.0, 3.0, 4.0]),
+                    "reward": torch.ones(1, 3, 1),
+                    "done": torch.tensor([False, False, True]).reshape(1, 3, 1),
+                    "terminated": torch.tensor([False, False, terminated]).reshape(
+                        1, 3, 1
+                    ),
+                },
+                batch_size=(1, 3),
+            ),
+        },
+        batch_size=(1, 3),
+    )
+
+    # compute_gae_direct only calls the critic; the stub stands in fine.
+    critic = cast(SofaCriticNet, _PlantedValueCritic())
+    compute_gae_direct(data, critic, gamma=0.5, gae_lambda=0.5)
+
+    expected = torch.tensor(expected_adv).reshape(1, 3, 1)
+    torch.testing.assert_close(data["advantage"], expected)
+    values = torch.tensor([1.0, 2.0, 3.0]).reshape(1, 3, 1)
+    torch.testing.assert_close(data["value_target"], expected + values)
 
 
 def test_extract_episode_metrics_returns_none_when_no_done() -> None:

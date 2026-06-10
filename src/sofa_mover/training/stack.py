@@ -34,28 +34,13 @@ class TrainingStack:
     collector: Collector
 
 
-def build_training_stack(
+def build_actor(
     config: TrainingConfig,
-) -> TrainingStack:
-    """Build env, modules, loss, optimizer, and collector."""
-    device = config.device
-    num_envs = config.num_envs
-    env_cfg = config.env
-
-    # --- Environment ---
-    env = make_sofa_env(
-        total_frames=config.total_frames,
-        num_envs=num_envs,
-        cfg=env_cfg,
-        device=device,
-    )
-    normalizer = Normalizer.from_config(config, num_envs)
-
-    # --- Networks (encoder selected from cfg) ---
-    # bins for [-n·δ, ..., -δ, 0, +δ, ..., +n·δ]
-    n_bins = 2 * env_cfg.n_magnitude_levels + 1
-    nvec = [n_bins, n_bins, n_bins]
-
+    normalizer: Normalizer | None,
+    device: torch.device,
+) -> tuple[SofaActorNet, TensorDictModule, ProbabilisticActor]:
+    """Build the actor net and its TorchRL wrappers."""
+    nvec = config.env.nvec
     encoder = build_encoder(config, normalizer)
     actor_net = SofaActorNet(
         nvec=nvec,
@@ -63,13 +48,6 @@ def build_training_stack(
         width=config.head_width,
         depth=config.head_depth,
     ).to(device)
-    critic_net = SofaCriticNet(
-        encoder=actor_net.encoder,
-        width=config.head_width,
-        depth=config.head_depth,
-    ).to(device)
-
-    # Wrap actor for TorchRL
     actor_module = TensorDictModule(
         actor_net,
         in_keys=[
@@ -87,6 +65,32 @@ def build_training_stack(
         distribution_kwargs={"nvec": nvec},
         return_log_prob=True,
     )
+    return actor_net, actor_module, actor
+
+
+def build_training_stack(
+    config: TrainingConfig,
+) -> TrainingStack:
+    """Build env, modules, loss, optimizer, and collector."""
+    device = config.device
+    num_envs = config.num_envs
+
+    # --- Environment ---
+    env = make_sofa_env(
+        total_frames=config.total_frames,
+        num_envs=num_envs,
+        cfg=config.env,
+        device=device,
+    )
+    normalizer = Normalizer.from_config(config, num_envs)
+
+    # --- Networks (encoder selected from cfg, shared between actor & critic) ---
+    actor_net, _, actor = build_actor(config, normalizer, device)
+    critic_net = SofaCriticNet(
+        encoder=actor_net.encoder,
+        width=config.head_width,
+        depth=config.head_depth,
+    ).to(device)
 
     # Wrap critic for TorchRL
     critic = ValueOperator(

@@ -60,7 +60,14 @@ def main(
     rasterizer = Rasterizer(geometry, sofa_config, device=device)
 
     trajectory = make_l_bend_trajectory([15, 12, 12, 12, 15, 4])
-    sofa = torch.ones(1, 1, sofa_config.grid_size, sofa_config.grid_size, device=device)
+    sofa = torch.ones(
+        1,
+        1,
+        sofa_config.grid_size,
+        sofa_config.grid_size,
+        dtype=torch.bool,
+        device=device,
+    )
 
     frames: list[FrameData] = []
     for step, pose_vals in enumerate(trajectory):
@@ -72,7 +79,7 @@ def main(
             compute_frame_data(
                 step,
                 (pose_vals[0], pose_vals[1], pose_vals[2]),
-                sofa,
+                sofa.float(),
                 mask,
                 cell_area,
             )

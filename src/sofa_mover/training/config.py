@@ -64,6 +64,16 @@ class SofaEnvConfig:
     # Actions are sampled independently per axis (dx, dy, dθ).
     n_magnitude_levels: int = 7
 
+    @property
+    def n_bins(self) -> int:
+        """Bins per action axis: {-n·δ, ..., -δ, 0, +δ, ..., +n·δ}."""
+        return 2 * self.n_magnitude_levels + 1
+
+    @property
+    def nvec(self) -> list[int]:
+        """Bins per axis for the MultiDiscrete action space (dx, dy, dθ)."""
+        return [self.n_bins] * 3
+
 
 @dataclass(frozen=True)
 class TrainingConfig:

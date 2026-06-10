@@ -44,14 +44,20 @@ def _batch_kernel(
     max_area, max_flat = terminal_area.flatten().max(dim=0)
 
     done_pos = torch.where(done, arange_t, neg_one)
-    latest_done_cm, _ = done_pos.cummax(dim=1)
-    last_done = latest_done_cm[:, -1]
-    latest_done_prior = F.pad(latest_done_cm[:, :-1], (1, 0), value=-1)
+    last_done = done_pos.max(dim=1).values  # (B,), -1 if no done in batch
+    # Only the in-progress tail (steps after the last done) must land in the
+    # carryover; steps of episodes completed within this batch get negative
+    # positions here and are routed to the scratch column (last column, never
+    # read). Duplicate index_put targets are nondeterministic on CUDA, so this
+    # matters: every real (row, position) target stays unique, and duplicates
+    # only pile up in the scratch column, where the winner is irrelevant.
     write_pos = torch.where(
-        latest_done_prior == -1,
+        last_done.unsqueeze(1) == -1,
         carryover_len.unsqueeze(1) + arange_t,
-        arange_t - latest_done_prior - 1,
+        arange_t - last_done.unsqueeze(1) - 1,
     )
+    scratch_col = carryover.shape[1] - 1
+    write_pos = torch.where(write_pos >= 0, write_pos, scratch_col)
     new_carryover = carryover.index_put(
         (env_idx.expand(-1, T), write_pos), batch_indices
     )
@@ -71,7 +77,8 @@ class BestEpisodeTracker:
     env b. Under that contract `carryover_len[b]` is bounded by `max_steps`.
     """
 
-    carryover: Int[Tensor, "B max_steps n_axes"]
+    # Last column is a scratch slot for discarded writes, never read back.
+    carryover: Int[Tensor, "B max_steps_plus_1 n_axes"]
     carryover_len: Int[Tensor, "B"]  # noqa: F821 (jaxtyping dim name)
     best_area: float
     best_actions: Tensor | None
@@ -91,7 +98,7 @@ class BestEpisodeTracker:
         self.device = device
 
         self.carryover = torch.zeros(
-            num_envs, max_steps, _N_AXES, dtype=torch.int8, device=device
+            num_envs, max_steps + 1, _N_AXES, dtype=torch.int8, device=device
         )
         self.carryover_len = torch.zeros(num_envs, dtype=torch.long, device=device)
         self._env_idx = torch.arange(num_envs, device=device).unsqueeze(1)  # (B, 1)

@@ -51,7 +51,7 @@ def _analytical_swept_mask(
     x_grid: Float[Tensor, "H W"],
     y_grid: Float[Tensor, "H W"],
     rect_bounds: Float[Tensor, "R 4"],
-) -> tuple[Float[Tensor, "B 1 H W"], Float[Tensor, "B 1 H W"]]:
+) -> tuple[Bool[Tensor, "B 1 H W"], Bool[Tensor, "B 1 H W"]]:
     """Compute swept corridor mask between two poses via analytical check.
 
     Samples num_substeps intermediate poses (excluding previous, including next),
@@ -99,9 +99,16 @@ class Rasterizer:
             self._x_grid: Tensor = x_grid
             self._y_grid: Tensor = y_grid
         else:
+            # Pixel-center grid: grid_size cells of width world_size/grid_size
+            # tile [-half, half] exactly, so (world_size/grid_size)² is the
+            # exact per-cell area.
             half = sofa_config.world_size / 2
             H = sofa_config.grid_size
-            coords = torch.linspace(-half, half, H, device=device)
+            spacing = sofa_config.world_size / H
+            coords = (
+                -half
+                + (torch.arange(H, dtype=torch.float32, device=device) + 0.5) * spacing
+            )
             y_default, x_default = torch.meshgrid(coords, coords, indexing="ij")
             self._x_grid = x_default
             self._y_grid = y_default
@@ -114,14 +121,14 @@ class Rasterizer:
     def device(self) -> torch.device:
         return self._x_grid.device
 
-    def corridor_mask(self, pose: Pose) -> Float[Tensor, "B 1 Hs Ws"]:
+    def corridor_mask(self, pose: Pose) -> Bool[Tensor, "B 1 Hs Ws"]:
         """Compute corridor mask on the sofa grid for a batch of corridor poses.
 
         Args:
             pose: Batch of corridor poses (B, 3) — columns are x, y, theta.
 
         Returns:
-            Binary corridor mask (B, 1, Hs, Ws). 1.0 = passable, 0.0 = wall.
+            Boolean corridor mask (B, 1, Hs, Ws). True = passable, False = wall.
         """
         return self._corridor_mask_fn(
             pose, self._x_grid, self._y_grid, self._rect_bounds
@@ -132,7 +139,7 @@ class Rasterizer:
         pose_prev: Pose,
         pose_next: Pose,
         num_substeps: int,
-    ) -> tuple[Float[Tensor, "B 1 Hs Ws"], Float[Tensor, "B 1 Hs Ws"]]:
+    ) -> tuple[Bool[Tensor, "B 1 Hs Ws"], Bool[Tensor, "B 1 Hs Ws"]]:
         """Compute the swept corridor mask between two poses.
 
         Samples num_substeps intermediate poses (excluding the previous, including

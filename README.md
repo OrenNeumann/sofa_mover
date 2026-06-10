@@ -46,7 +46,7 @@ To run the optimization manually against a saved checkpoint:
 uv run python -m sofa_mover.optimize_trajectory \
     --checkpoint output/best_policy.pt \
     --output output/optimized_trajectory.gif \
-    --iters 600 --pop-size 128
+    --n-iters 600 --pop-size 128
 ```
 
 The script also exposes `optimize_trajectory(...)` / `optimize_from_checkpoint(...)`

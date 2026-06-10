@@ -13,17 +13,12 @@ from typing import cast
 
 import torch
 from tensordict import TensorDictBase
-from tensordict.nn import TensorDictModule
-from torchrl.modules import ProbabilisticActor
 
 from sofa_mover.env import SofaEnv, make_sofa_env
-from sofa_mover.networks import (
-    MultiDiscreteCategorical,
-    SofaActorNet,
-    build_encoder,
-)
+from sofa_mover.networks import MultiDiscreteCategorical
 from sofa_mover.training.config import DEVICE, TrainingConfig
 from sofa_mover.training.normalizer import Normalizer
+from sofa_mover.training.stack import build_actor
 from sofa_mover.visualization.render import (
     FrameData,
     compute_frame_data,
@@ -85,34 +80,9 @@ def evaluate(
     )
     normalizer = Normalizer.from_config(training_config, num_envs=1, device=device)
     normalizer.freeze = True
-    if "vec_normalize" in checkpoint:
-        normalizer.load_state_dict(checkpoint["vec_normalize"])
+    normalizer.load_state_dict(checkpoint["vec_normalize"])
 
-    nvec = [2 * cfg.n_magnitude_levels + 1] * 3
-
-    encoder = build_encoder(training_config, normalizer)
-    actor_net = SofaActorNet(
-        nvec=nvec,
-        encoder=encoder,
-        width=training_config.head_width,
-        depth=training_config.head_depth,
-    ).to(device)
-    actor_module = TensorDictModule(
-        actor_net,
-        in_keys=[
-            ("observation", "sofa_view"),
-            ("observation", "pose"),
-            ("observation", "progress"),
-        ],
-        out_keys=["logits"],
-    )
-    actor = ProbabilisticActor(
-        module=actor_module,
-        in_keys=["logits"],
-        out_keys=["action"],
-        distribution_class=MultiDiscreteCategorical,
-        distribution_kwargs={"nvec": nvec},
-    )
+    _, actor_module, actor = build_actor(training_config, normalizer, device)
     actor.load_state_dict(checkpoint["actor"])
     actor.eval()
 
@@ -121,13 +91,7 @@ def evaluate(
 
     def greedy_action(td: TensorDictBase, step: int) -> torch.Tensor:
         logits = actor_module(td)["logits"]
-        one_hots = [
-            torch.zeros(logits.shape[0], n, device=device).scatter_(
-                1, lg.argmax(dim=-1, keepdim=True), 1.0
-            )
-            for lg, n in zip(logits.split(nvec, dim=-1), nvec)
-        ]
-        return torch.cat(one_hots, dim=-1)
+        return MultiDiscreteCategorical(logits=logits, nvec=cfg.nvec).mode
 
     greedy_frames = _rollout(env, greedy_action, cfg.max_steps)
     greedy_path = render_trajectory(
@@ -141,10 +105,7 @@ def evaluate(
         f"(final area {greedy_frames[-1].area:.4f})"
     )
 
-    if (
-        "best_trajectory_actions" in checkpoint
-        and checkpoint["best_trajectory_actions"] is not None
-    ):
+    if checkpoint["best_trajectory_actions"] is not None:
         replay_actions: torch.Tensor = checkpoint["best_trajectory_actions"].to(device)
         replay_frames = _rollout(
             env,

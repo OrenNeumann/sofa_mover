@@ -215,6 +215,9 @@ def optimize_ppo_epochs(
             # advantage spikes can blow up approx_kl > 1 within one epoch
             # (cubic terminal reward in this env). Catch that immediately.
             # Threshold is 4× target_kl: tolerates normal drift, kills outliers.
+            # The .item() sync is free here — the loop is dominated by the
+            # backward/optimizer kernels (benchmarked vs an async pinned-memory
+            # check, which was strictly slower).
             if target_kl is not None and approx_kl_mb.item() > 4.0 * target_kl:
                 break_outer = True
                 break

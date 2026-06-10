@@ -11,7 +11,9 @@ Entry points:
 
 - ``optimize_trajectory(seed_actions, config, ...)``: optimize a given action
   sequence; called from ``train.py`` at end of training.
-- ``__main__``: CLI that loads a checkpoint, then forwards to the above.
+- ``optimize_from_checkpoint(checkpoint_path, ...)``: load a checkpoint's
+  recorded best trajectory, then forward to the above.
+- ``__main__``: CLI wrapper around ``optimize_from_checkpoint``.
 """
 
 from __future__ import annotations
@@ -271,6 +273,25 @@ def optimize_trajectory(
     return gif_path
 
 
+def optimize_from_checkpoint(
+    checkpoint_path: str | Path = DEFAULT_CHECKPOINT_PATH,
+    output_path: str | Path = DEFAULT_OUTPUT_PATH,
+    cem_config: CEMConfig = CEMConfig(),
+) -> Path:
+    """Optimize the best trajectory recorded in a training checkpoint."""
+    checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
+    if checkpoint["best_trajectory_actions"] is None:
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} has no recorded best trajectory."
+        )
+    return optimize_trajectory(
+        checkpoint["best_trajectory_actions"],
+        checkpoint["config"],
+        output_path,
+        cem_config,
+    )
+
+
 def main() -> None:
     import argparse
 
@@ -283,18 +304,7 @@ def main() -> None:
         )
     args = parser.parse_args()
     cem_config = CEMConfig(**{f.name: getattr(args, f.name) for f in fields(CEMConfig)})
-
-    checkpoint = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
-    if checkpoint["best_trajectory_actions"] is None:
-        raise ValueError(
-            f"Checkpoint {args.checkpoint} has no recorded best trajectory."
-        )
-    optimize_trajectory(
-        checkpoint["best_trajectory_actions"],
-        checkpoint["config"],
-        args.output,
-        cem_config,
-    )
+    optimize_from_checkpoint(args.checkpoint, args.output, cem_config)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import math
 
 import torch
 import torch.nn.functional as F
-from jaxtyping import Float
+from jaxtyping import Bool, Float
 from torch import Tensor
 
 
@@ -13,11 +13,11 @@ class BoundaryExtractor:
 
     Precomputes a grid of sample points along evenly-spaced rays from the
     initial sofa's COM.  At each step, samples the sofa along these rays
-    and returns the normalized distance to the first gap per ray.
+    and returns the normalized total mass along each ray.
     """
 
     def __init__(
-        self, n_rays: int, init_sofa: Float[Tensor, "H W"], device: torch.device
+        self, n_rays: int, init_sofa: Bool[Tensor, "H W"], device: torch.device
     ) -> None:
         crop_h, crop_w = init_sofa.shape
         angles = torch.linspace(0, 2 * math.pi, n_rays + 1, device=device)[:-1]
@@ -40,8 +40,8 @@ class BoundaryExtractor:
 
     def __call__(
         self,
-        sofa: Float[Tensor, "B 1 H W"],
-        corridor: Float[Tensor, "B 1 H W"],
+        sofa: Bool[Tensor, "B 1 H W"],
+        corridor: Bool[Tensor, "B 1 H W"],
     ) -> Float[Tensor, "B 2N"]:
         """Extract concatenated [sofa | corridor] radial boundary profiles."""
         combined = torch.cat([sofa, corridor], dim=1).float()  # (B, 2, H, W)

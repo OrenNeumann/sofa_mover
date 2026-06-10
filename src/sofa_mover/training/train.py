@@ -9,6 +9,7 @@ from wandb.sdk import init as wandb_init
 from wandb.sdk.data_types.image import Image
 
 from sofa_mover.evaluate import evaluate
+from sofa_mover.optimize_trajectory import optimize_trajectory
 from sofa_mover.training.best_tracker import BestEpisodeTracker
 from sofa_mover.training.config import TrainingConfig
 from sofa_mover.training.normalizer import Normalizer
@@ -186,6 +187,14 @@ def main() -> None:
         output_path=str(output_path / "agent_trajectory.gif"),
         device=config.device,
     )
+
+    # Post-training refinement, with vanilla non-ML optimization.
+    if best_tracker.best_actions is not None:
+        optimize_trajectory(
+            best_tracker.best_actions,
+            config,
+            output_path / "optimized_trajectory.gif",
+        )
 
 
 if __name__ == "__main__":
