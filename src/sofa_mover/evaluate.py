@@ -34,9 +34,7 @@ def _collect_frame(env: SofaEnv, step: int) -> FrameData:
         env._pose[0, 1].item(),
         env._pose[0, 2].item(),
     )
-    sofa = env._sofa[:1].float()
-    corridor = env.rasterizer.corridor_mask(env._pose[:1])
-    return compute_frame_data(step, pose, sofa, corridor, env.cell_area)
+    return compute_frame_data(step, pose, env._sofa[:1].float(), env.cell_area)
 
 
 def _rollout(
@@ -99,6 +97,8 @@ def evaluate(
         out,
         sofa_extent=env.sofa_extent,
         corridor_width=cfg.corridor_width,
+        goal_point=cfg.goal_point,
+        goal_radius=cfg.goal_radius,
     )
     print(
         f"Greedy: saved {len(greedy_frames)}-frame trajectory to {greedy_path} "
@@ -117,6 +117,8 @@ def evaluate(
             out.with_name(out.stem + "_best_train.gif"),
             sofa_extent=env.sofa_extent,
             corridor_width=cfg.corridor_width,
+            goal_point=cfg.goal_point,
+            goal_radius=cfg.goal_radius,
         )
         recorded = checkpoint["best_trajectory_area"]
         print(

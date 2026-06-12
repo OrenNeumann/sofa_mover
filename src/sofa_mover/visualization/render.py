@@ -1,4 +1,11 @@
-"""Rendering utilities for sofa erosion trajectory videos."""
+"""Rendering utilities for sofa erosion trajectory videos.
+
+The trajectory video is a single corridor-frame view: the corridor stays
+fixed while the sofa travels through it. The final (surviving) sofa shape is
+drawn solid; the material that will eventually be eroded surrounds it as a
+translucent halo that disappears exactly where and when the simulation
+removes it, leaving a brief warm trace at the walls.
+"""
 
 import warnings
 from collections.abc import Callable, Sequence
@@ -10,6 +17,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from jaxtyping import Float
+from matplotlib.patches import Circle, Rectangle
 from numpy.typing import NDArray
 from PIL import GifImagePlugin, Image, ImageFilter
 from torch import Tensor
@@ -28,13 +36,31 @@ Extent = tuple[float, float, float, float]
 # Constants
 # ---------------------------------------------------------------------------
 
-DARK_GRAY = np.array([0.2, 0.2, 0.2], dtype=np.float32)
+CANVAS = np.array([0.105, 0.11, 0.12], dtype=np.float32)
 STEEL_BLUE = np.array([0.27, 0.47, 0.73], dtype=np.float32)
 GLOW_ORANGE = np.array([1.0, 0.76, 0.28], dtype=np.float32)
+HALO_BLUE = np.array([0.38, 0.55, 0.78], dtype=np.float32)
 
-LEFT_PAD_FRACTION = 0.08
-TITLE_PAD = 12.0
-PANEL_TARGET_SHORT_SIDE: int = 384
+PANEL_TARGET_SHORT_SIDE: int = 480
+# Masks are composited at this multiple of display resolution, then box-
+# downsampled — cheap anti-aliasing for every edge in the frame.
+SUPERSAMPLE = 2
+# Rendered frames per simulation step (poses interpolated in between).
+SMOOTH_STEPS = 2
+
+# Area of Gerver's sofa, the best known solution for a width-1 L-corridor.
+GERVER_AREA = 2.2074
+
+# Doomed-material halo opacity.
+HALO_ALPHA = 0.5
+# Drop shadow cast by the block (light from the top-left).
+SHADOW_ALPHA = 0.35
+# Erosion trace: per-rendered-frame decay and peak opacity of the embers.
+TRACE_DECAY = 0.88
+TRACE_ALPHA = 0.5
+# Frame durations (ms): linger on the intact block and on the solved sofa.
+HOLD_FIRST_MS = 1200
+HOLD_LAST_MS = 3000
 
 # World width spanned by one full repeat of the floor texture.
 FLOOR_TILE_WORLD_SIZE_X: float = 4.5
@@ -75,7 +101,6 @@ class FrameData:
     step: int
     pose: tuple[float, float, float]
     sofa: ScalarImage
-    corridor_mask: ScalarImage
     area: float
 
 
@@ -83,7 +108,6 @@ def compute_frame_data(
     step: int,
     pose: tuple[float, float, float],
     sofa: Float[Tensor, "1 1 H W"],
-    corridor_mask: Float[Tensor, "1 1 H W"],
     cell_area: float,
 ) -> FrameData:
     """Package tensor data into a FrameData for rendering."""
@@ -91,7 +115,6 @@ def compute_frame_data(
         step=step,
         pose=pose,
         sofa=sofa[0, 0].cpu().numpy(),
-        corridor_mask=corridor_mask[0, 0].cpu().numpy(),
         area=sofa.sum().item() * cell_area,
     )
 
@@ -117,7 +140,7 @@ def _world_to_corridor_coords(
     world_y: NDArray[np.float32],
     pose: tuple[float, float, float],
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
-    """Transform world coordinates to corridor-local coordinates."""
+    """Transform world (sofa-frame) coordinates to corridor-local coordinates."""
     tx, ty, theta = pose
     cos_t = np.float32(np.cos(theta))
     sin_t = np.float32(np.sin(theta))
@@ -158,17 +181,6 @@ def _sample_image_at_world_coords(
     return sampled
 
 
-def sample_image_in_extent(
-    image: ScalarImage,
-    source_extent: Extent,
-    target_extent: Extent,
-    output_shape: tuple[int, int],
-) -> ScalarImage:
-    """Resample an image from one world-coordinate extent onto another."""
-    world_x, world_y = _make_grid(target_extent, output_shape)
-    return _sample_image_at_world_coords(image, source_extent, world_x, world_y)
-
-
 def sample_sofa_in_corridor_frame(
     sofa: ScalarImage,
     pose: tuple[float, float, float],
@@ -186,11 +198,6 @@ def sample_sofa_in_corridor_frame(
     return _sample_image_at_world_coords(sofa, sofa_extent, world_x, world_y)
 
 
-# ---------------------------------------------------------------------------
-# Corridor mask builders
-# ---------------------------------------------------------------------------
-
-
 def build_corridor_mask(
     extent: Extent,
     output_shape: tuple[int, int],
@@ -199,32 +206,6 @@ def build_corridor_mask(
     """Build an L-corridor mask directly in corridor-local coordinates."""
     x_grid, y_grid = _make_grid(extent, output_shape)
     return _is_in_l_corridor(x_grid, y_grid, corridor_width / 2).astype(np.float32)
-
-
-def build_world_corridor_mask(
-    pose: tuple[float, float, float],
-    extent: Extent,
-    output_shape: tuple[int, int],
-    corridor_width: float,
-) -> ScalarImage:
-    """Build an L-corridor mask in world coordinates for a given pose."""
-    world_x, world_y = _make_grid(extent, output_shape)
-    cx, cy = _world_to_corridor_coords(world_x, world_y, pose)
-    return _is_in_l_corridor(cx, cy, corridor_width / 2).astype(np.float32)
-
-
-# ---------------------------------------------------------------------------
-# Extent helpers
-# ---------------------------------------------------------------------------
-
-
-def expand_extent(extent: Extent, shape: tuple[int, int], pad_pixels: int) -> Extent:
-    """Expand a world-coordinate extent to match pixel padding."""
-    height, width = shape
-    x_min, x_max, y_min, y_max = extent
-    x_pad = (x_max - x_min) * pad_pixels / width
-    y_pad = (y_max - y_min) * pad_pixels / height
-    return (x_min - x_pad, x_max + x_pad, y_min - y_pad, y_max + y_pad)
 
 
 def _aspect_matched_shape(extent: Extent, target_short_side: int) -> tuple[int, int]:
@@ -241,72 +222,28 @@ def _aspect_matched_shape(extent: Extent, target_short_side: int) -> tuple[int, 
     return (rows, cols)
 
 
-def _mask_bbox(mask: ScalarImage, extent: Extent) -> Extent:
-    """World-coordinate bounding box of the nonzero region of a mask."""
-    nonzero = np.argwhere(mask > 0)
-    if nonzero.size == 0:
-        raise RuntimeError("Expected sofa mask to contain at least one nonzero pixel.")
-
-    y_min_idx, x_min_idx = nonzero.min(axis=0)
-    y_max_idx, x_max_idx = nonzero.max(axis=0)
-    height, width = mask.shape
-    x_min, x_max, y_min, y_max = extent
-    x_step = (x_max - x_min) / (width - 1)
-    y_step = (y_max - y_min) / (height - 1)
-    return (
-        float(x_min + x_step * x_min_idx),
-        float(x_min + x_step * x_max_idx),
-        float(y_min + y_step * y_min_idx),
-        float(y_min + y_step * y_max_idx),
-    )
-
-
-def compute_corridor_replay_extent(
+def _trajectory_extent(
     frames: Sequence[FrameData],
-    final_sofa: ScalarImage,
     sofa_extent: Extent,
     corridor_width: float,
+    margin: float = 0.45,
 ) -> Extent:
-    """Compute a zoomed-out corridor-local extent that fits the full replay."""
-    x0, x1, y0, y1 = _mask_bbox(final_sofa, sofa_extent)
+    """Corridor-frame extent containing the original block at every pose."""
+    x0, x1, y0, y1 = sofa_extent
     corners = np.array([[x0, y0], [x0, y1], [x1, y0], [x1, y1]], dtype=np.float32)
-
-    all_points = [
+    points = [
         np.column_stack(_world_to_corridor_coords(corners[:, 0], corners[:, 1], f.pose))
         for f in frames
     ]
     half = corridor_width / 2
-    all_points.append(
-        np.array(
-            [[-half, -half], [-half, half], [half, -half], [half, half]],
-            dtype=np.float32,
-        )
-    )
-    stacked = np.concatenate(all_points, axis=0)
-
-    margin = corridor_width + 0.5 * max(x1 - x0, y1 - y0)
+    points.append(np.array([[-half, -half], [half, half]], dtype=np.float32))
+    stacked = np.concatenate(points, axis=0)
     return (
         float(stacked[:, 0].min()) - margin,
         float(stacked[:, 0].max()) + margin,
         float(stacked[:, 1].min()) - margin,
         float(stacked[:, 1].max()) + margin,
     )
-
-
-# ---------------------------------------------------------------------------
-# Rotation helpers
-# ---------------------------------------------------------------------------
-
-
-def rotate_image_counterclockwise(image: NDArray[np.float32]) -> NDArray[np.float32]:
-    """Rotate an image 90 degrees counterclockwise."""
-    return np.rot90(image, k=1).copy()
-
-
-def rotate_extent_counterclockwise(extent: Extent) -> Extent:
-    """Rotate display coordinates 90 degrees counterclockwise."""
-    x_min, x_max, y_min, y_max = extent
-    return (-y_max, -y_min, x_min, x_max)
 
 
 # ---------------------------------------------------------------------------
@@ -347,34 +284,36 @@ def _tiled_floor(shape: tuple[int, int]) -> ColorImage:
     return np.tile(FLOOR_TEXTURE, (rh, rw, 1))[:h, :w].copy()
 
 
+def _soft_mask(mask: ScalarImage, radius: float) -> ScalarImage:
+    """Gaussian-soften a 0..1 mask via PIL."""
+    img = Image.fromarray((np.clip(mask, 0.0, 1.0) * 255).astype(np.uint8))
+    return (
+        np.asarray(img.filter(ImageFilter.GaussianBlur(radius)), dtype=np.float32)
+        / 255.0
+    )
+
+
 def _build_background(
     shape: tuple[int, int],
     corridor_mask: ScalarImage,
     world_x: NDArray[np.float32] | None,
     world_y: NDArray[np.float32] | None,
-    glow: ScalarImage | None,
 ) -> ColorImage:
-    """Floor + walls (with optional glow) — everything that isn't the sofa."""
+    """Parquet floor sunk into the dark canvas.
+
+    Walls share the canvas color; an ambient-occlusion rim darkens the floor
+    where it meets them, which is what makes the corridor read as recessed.
+    """
     if world_x is not None and world_y is not None:
         rgb = _floor_from_world_coords(world_x, world_y)
     else:
         rgb = _tiled_floor(shape)
-    rgb = 0.78 * rgb + 0.08
+    rgb = 0.82 * rgb + 0.06
 
     wall = corridor_mask == 0
-    rgb[wall] = DARK_GRAY
-
-    if glow is not None:
-        glow_u8 = (np.minimum(glow, 1.0) * 255).astype(np.uint8)
-        glow_img = (
-            Image.fromarray(glow_u8)
-            .filter(ImageFilter.MaxFilter(5))
-            .filter(ImageFilter.GaussianBlur(min(shape) / 40))
-        )
-        alpha = np.asarray(glow_img, dtype=np.float32) / 255.0
-        alpha_wall = alpha[wall][:, None]
-        rgb[wall] = rgb[wall] * (1.0 - alpha_wall) + GLOW_ORANGE * alpha_wall
-
+    occlusion = _soft_mask(wall.astype(np.float32), min(shape) / 70)
+    rgb *= 1.0 - 0.45 * occlusion[..., None]
+    rgb[wall] = CANVAS
     return rgb
 
 
@@ -383,18 +322,32 @@ def _overlay_sofa(
     sofa: ScalarImage,
     corridor_mask: ScalarImage,
 ) -> ColorImage:
-    """Paint the sofa (with shading and dark boundary) over a prepared background."""
-    sofa_present = (corridor_mask == 1) & (sofa == 1)
-    sofa_u8 = sofa_present.astype(np.uint8) * 255
-    sofa_img = Image.fromarray(sofa_u8)
+    """Paint the sofa over a prepared background.
 
-    sofa_eroded = np.asarray(sofa_img.filter(ImageFilter.MinFilter(3))).astype(bool)
-    sofa_blur = sofa_img.filter(ImageFilter.GaussianBlur(min(sofa.shape) / 20))
-    sofa_shade = 0.55 + 0.45 * np.asarray(sofa_blur, dtype=np.float32) / 255.0
+    Shading combines a soft "puff" from the blurred mask with a directional
+    light from the top-left (gradient of the puff), plus a darker boundary rim.
+    """
+    present = (corridor_mask == 1) & (sofa == 1)
+    sofa_img = Image.fromarray(present.astype(np.uint8) * 255)
+
+    interior = np.asarray(sofa_img.filter(ImageFilter.MinFilter(3))).astype(bool)
+    puff = (
+        np.asarray(
+            sofa_img.filter(ImageFilter.GaussianBlur(min(sofa.shape) / 20)),
+            dtype=np.float32,
+        )
+        / 255.0
+    )
+    grad_y, grad_x = np.gradient(puff)
+    ndotl = grad_x - grad_y  # light from the top-left (origin="lower")
+    peak = np.abs(ndotl).max()
+    if peak > 0:
+        ndotl = ndotl / peak
+    shade = (0.62 + 0.38 * puff) * (1.0 + 0.22 * ndotl)
 
     rgb = background.copy()
-    rgb[sofa_present] = STEEL_BLUE * sofa_shade[sofa_present][:, None]
-    rgb[sofa_present & ~sofa_eroded] = STEEL_BLUE * 0.45
+    rgb[present] = np.clip(STEEL_BLUE * shade[present][:, None], 0.0, 1.0)
+    rgb[present & ~interior] = STEEL_BLUE * 0.45
     return rgb
 
 
@@ -403,7 +356,6 @@ def build_composite(
     corridor_mask: ScalarImage,
     world_x: NDArray[np.float32] | None = None,
     world_y: NDArray[np.float32] | None = None,
-    glow: ScalarImage | None = None,
 ) -> ColorImage:
     """Build an RGB image from sofa and corridor mask arrays.
 
@@ -411,30 +363,15 @@ def build_composite(
     world-space coordinates so tiles remain stationary as the view moves.
     Without them the texture is tiled in pixel space (wandb image logging).
     """
-    background = _build_background(sofa.shape, corridor_mask, world_x, world_y, glow)
+    background = _build_background(sofa.shape, corridor_mask, world_x, world_y)
     return _overlay_sofa(background, sofa, corridor_mask)
 
 
-def _build_erosion_glow(
-    erosion_masks: Sequence[ScalarImage],
-    frame_idx: int,
-    erosion_peak: float,
-    sofa_extent: Extent,
-    target_extent: Extent,
-    output_shape: tuple[int, int],
-) -> ScalarImage:
-    """Composite recent erosion masks into a decaying world-space glow."""
-    glow = np.zeros(output_shape, dtype=np.float32)
-    if erosion_peak <= 0.0:
-        return glow
-    for lag, decay in enumerate((1.0, 0.65, 0.38, 0.18)):
-        if frame_idx < lag:
-            break
-        erosion = erosion_masks[frame_idx - lag]
-        glow += sample_image_in_extent(
-            erosion, sofa_extent, target_extent, output_shape
-        ) * np.float32(decay * erosion.sum() / erosion_peak)
-    return glow
+def _blend(rgb: ColorImage, color: NDArray[np.float32], alpha: ScalarImage) -> None:
+    """In-place alpha blend of a flat color into rgb."""
+    a = alpha[..., None]
+    rgb *= 1.0 - a
+    rgb += color * a
 
 
 # ---------------------------------------------------------------------------
@@ -452,18 +389,20 @@ def _render_palette_frame(fig: matplotlib.figure.Figure) -> Image.Image:
 def _write_streaming_gif(
     fig: matplotlib.figure.Figure,
     output_path: Path,
-    fps: int,
-    num_frames: int,
+    durations_ms: Sequence[int],
     draw_frame: Callable[[int], None],
 ) -> None:
-    """Write a GIF incrementally so long trajectories do not fill memory."""
-    frame_duration_ms = max(1, round(1000 / fps))
+    """Write a GIF incrementally so long trajectories do not fill memory.
+
+    `draw_frame` is called once per frame, in order — the renderer's erosion
+    trace relies on that sequencing.
+    """
     with output_path.open("wb") as file_obj:
-        for frame_idx in range(num_frames):
+        for frame_idx, duration in enumerate(durations_ms):
             draw_frame(frame_idx)
             frame = _render_palette_frame(fig)
             encoder_info: dict[str, int | bool] = {
-                "duration": frame_duration_ms,
+                "duration": duration,
                 "disposal": 2,
             }
             if frame_idx == 0:
@@ -481,20 +420,32 @@ def _write_streaming_gif(
 # ---------------------------------------------------------------------------
 
 
-def _shrink_extent(extent: Extent, factor: float) -> Extent:
-    """Shrink an extent symmetrically about its centre by `factor` (0..1)."""
-    x_min, x_max, y_min, y_max = extent
-    cx, cy = 0.5 * (x_min + x_max), 0.5 * (y_min + y_max)
-    hx, hy = 0.5 * (x_max - x_min) * factor, 0.5 * (y_max - y_min) * factor
-    return (cx - hx, cx + hx, cy - hy, cy + hy)
+def _downsample(rgb: ColorImage, factor: int) -> ColorImage:
+    """Box-downsample a supersampled composite to display resolution."""
+    h, w, _ = rgb.shape
+    binned = rgb.reshape(h // factor, factor, w // factor, factor, 3)
+    return binned.mean(axis=(1, 3), dtype=np.float32)
 
 
-def _square_extent(extent: Extent) -> Extent:
-    """Expand an extent symmetrically so its width equals its height."""
-    x_min, x_max, y_min, y_max = extent
-    cx, cy = 0.5 * (x_min + x_max), 0.5 * (y_min + y_max)
-    half = 0.5 * max(x_max - x_min, y_max - y_min)
-    return (cx - half, cx + half, cy - half, cy + half)
+def _render_plan(
+    frames: Sequence[FrameData],
+) -> list[tuple[int, tuple[float, float, float]]]:
+    """(source frame index, pose) per rendered frame.
+
+    Inserts SMOOTH_STEPS - 1 pose-interpolated frames before each step's
+    arrival; interpolated frames reuse the previous step's sofa mask (erosion
+    lands when the step completes).
+    """
+    plan = [(0, frames[0].pose)]
+    for i in range(1, len(frames)):
+        prev = np.array(frames[i - 1].pose)
+        cur = np.array(frames[i].pose)
+        for k in range(1, SMOOTH_STEPS):
+            t = k / SMOOTH_STEPS
+            x, y, theta = prev + t * (cur - prev)
+            plan.append((i - 1, (float(x), float(y), float(theta))))
+        plan.append((i, frames[i].pose))
+    return plan
 
 
 def render_trajectory(
@@ -503,121 +454,168 @@ def render_trajectory(
     sofa_extent: Extent,
     fps: int = 10,
     corridor_width: float = 1.0,
+    goal_point: tuple[float, float] | None = None,
+    goal_radius: float = 0.3,
 ) -> Path:
-    """Render a sequence of frames into an animated gif."""
+    """Render a trajectory into a single corridor-frame animated gif.
+
+    The final sofa shape is drawn solid; the rest of the original block is a
+    translucent halo that decays away as the corridor walls erode it. An area
+    gauge tracks the remaining area against Gerver's optimum.
+    """
     if len(frames) == 0:
         raise ValueError("Cannot render an empty trajectory.")
 
-    # Extents -------------------------------------------------------------
-    sofa_shape = frames[0].sofa.shape
-    left_pad = max(4, int(round(min(sofa_shape) * LEFT_PAD_FRACTION)))
-    left_extent = _square_extent(expand_extent(sofa_extent, sofa_shape, left_pad))
+    extent = _trajectory_extent(frames, sofa_extent, corridor_width)
+    shape = _aspect_matched_shape(extent, PANEL_TARGET_SHORT_SIDE)
+    shape_hi = (shape[0] * SUPERSAMPLE, shape[1] * SUPERSAMPLE)
+    corridor = build_corridor_mask(extent, shape_hi, corridor_width)
+    on_floor = corridor == 1
+    world_x, world_y = _make_grid(extent, shape_hi)
+    background = _build_background(shape_hi, corridor, world_x, world_y)
 
-    corridor_extent = _shrink_extent(
-        compute_corridor_replay_extent(
-            frames, frames[-1].sofa, sofa_extent, corridor_width
-        ),
-        factor=0.6,
-    )
-    rotated_corridor_extent = rotate_extent_counterclockwise(corridor_extent)
-
-    # Per-panel render shapes chosen to match each extent's aspect ratio so
-    # world-space sampling (including the floor texture) is isotropic.
-    left_shape = _aspect_matched_shape(left_extent, PANEL_TARGET_SHORT_SIDE)
-    right_shape = _aspect_matched_shape(corridor_extent, PANEL_TARGET_SHORT_SIDE)
-
-    # Static right-panel data: corridor mask, floor+walls background, pose-independent.
-    right_corridor = build_corridor_mask(corridor_extent, right_shape, corridor_width)
-    right_wx, right_wy = _make_grid(corridor_extent, right_shape)
-    right_background = _build_background(
-        right_shape, right_corridor, right_wx, right_wy, glow=None
-    )
-
-    # Left-panel fixed pixel grid (transformed to corridor-local per frame).
-    left_sx, left_sy = _make_grid(left_extent, left_shape)
-
-    # Erosion sequence for the left-panel glow.
     final_sofa = frames[-1].sofa
-    erosion_masks = [np.zeros_like(final_sofa)] + [
-        np.maximum(frames[idx - 1].sofa - frames[idx].sofa, 0.0).astype(np.float32)
-        for idx in range(1, len(frames))
-    ]
-    erosion_peak = max(float(mask.sum()) for mask in erosion_masks)
+    trace = np.zeros(shape_hi, dtype=np.float32)
+    px = min(shape_hi)
+    trace_blur = px / 160
+    shadow_blur = px / 110
+    shadow_off = round(px / 120)
 
-    # Figure setup --------------------------------------------------------
-    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(13, 5.5), dpi=120)
+    plan = _render_plan(frames)
+    max_area = frames[0].area
+    show_gerver = abs(corridor_width - 1.0) < 1e-9 and GERVER_AREA < max_area
 
-    left_dummy = np.zeros((*left_shape, 3), dtype=np.float32)
-    right_dummy = np.zeros((right_shape[1], right_shape[0], 3), dtype=np.float32)
-
-    left_artist = ax_left.imshow(
-        left_dummy, origin="lower", extent=left_extent, interpolation="bilinear"
-    )
-    ax_left.set_axis_off()
-    ax_left.set_aspect("equal")
-    left_title = ax_left.set_title(f"Sofa frame - step {frames[0].step}", pad=TITLE_PAD)
-
-    right_artist = ax_right.imshow(
-        right_dummy,
+    # Figure: dark full-bleed canvas, manual layout ------------------------
+    x_min, x_max, y_min, y_max = extent
+    aspect = (x_max - x_min) / (y_max - y_min)
+    main_box = (0.04, 0.115, 0.92, 0.80)  # (left, bottom, width, height)
+    fig_height = 6.6
+    fig_width = fig_height * aspect * main_box[3] / main_box[2]
+    canvas_color = tuple(float(c) for c in CANVAS)
+    fig = plt.figure(figsize=(fig_width, fig_height), dpi=100, facecolor=canvas_color)
+    ax = fig.add_axes(main_box)
+    ax.set_facecolor(canvas_color)
+    ax.set_axis_off()
+    ax.set_aspect("equal")
+    artist = ax.imshow(
+        np.zeros((*shape, 3), dtype=np.float32),
         origin="lower",
-        extent=rotated_corridor_extent,
+        extent=extent,
         interpolation="bilinear",
     )
-    ax_right.set_axis_off()
-    ax_right.set_aspect("equal")
-    ax_right.set_title(f"Corridor frame - area {frames[-1].area:.3f}", pad=TITLE_PAD)
-
-    fig.tight_layout()
-
-    # Per-frame drawing ---------------------------------------------------
-    def draw_frame(frame_idx: int) -> None:
-        frame = frames[frame_idx]
-
-        left_sofa = sample_image_in_extent(
-            frame.sofa, sofa_extent, left_extent, left_shape
-        )
-        left_corridor = build_world_corridor_mask(
-            frame.pose, left_extent, left_shape, corridor_width
-        )
-        left_cx, left_cy = _world_to_corridor_coords(left_sx, left_sy, frame.pose)
-        left_glow = _build_erosion_glow(
-            erosion_masks,
-            frame_idx,
-            erosion_peak,
-            sofa_extent,
-            left_extent,
-            left_shape,
-        )
-        left_artist.set_data(
-            build_composite(
-                left_sofa,
-                left_corridor,
-                world_x=left_cx,
-                world_y=left_cy,
-                glow=left_glow,
+    if goal_point is not None:
+        ax.add_patch(
+            Circle(
+                goal_point,
+                goal_radius,
+                fill=False,
+                edgecolor=(1.0, 1.0, 1.0, 0.5),
+                linewidth=1.2,
             )
         )
-        left_title.set_text(f"Sofa frame - step {frame.step}")
 
-        right_sofa = sample_sofa_in_corridor_frame(
-            final_sofa,
-            frame.pose,
-            sofa_extent,
-            corridor_extent,
-            right_shape,
+    fig.text(0.05, 0.94, " ".join("THE MOVING SOFA"), fontsize=11, color="0.8")
+    readout = fig.text(
+        0.95,
+        0.94,
+        "",
+        ha="right",
+        family="DejaVu Sans Mono",
+        fontsize=10,
+        color="0.62",
+    )
+
+    # Area gauge: remaining area, with a tick at Gerver's optimum.
+    gauge = fig.add_axes((0.32, 0.052, 0.36, 0.012))
+    gauge.set_xlim(0, max_area)
+    gauge.set_ylim(0, 1)
+    gauge.set_axis_off()
+    gauge.add_patch(Rectangle((0, 0), max_area, 1, color="0.22"))
+    gauge_fill = Rectangle((0, 0), max_area, 1, color=tuple(STEEL_BLUE))
+    gauge.add_patch(gauge_fill)
+    gauge.text(
+        -0.04,
+        0.5,
+        "area",
+        transform=gauge.transAxes,
+        ha="right",
+        va="center",
+        fontsize=8,
+        color="0.55",
+    )
+    if show_gerver:
+        gauge.plot(
+            [GERVER_AREA, GERVER_AREA], [-0.7, 1.7], color="0.85", lw=1.0, clip_on=False
         )
-        right_img = _overlay_sofa(right_background, right_sofa, right_corridor)
-        right_artist.set_data(rotate_image_counterclockwise(right_img))
+        gauge.text(
+            GERVER_AREA,
+            2.6,
+            f"Gerver {GERVER_AREA:.3f}",
+            ha="center",
+            fontsize=7.5,
+            color="0.55",
+        )
+
+    def in_corridor_frame(
+        mask: ScalarImage, pose: tuple[float, float, float]
+    ) -> ScalarImage:
+        return sample_sofa_in_corridor_frame(mask, pose, sofa_extent, extent, shape_hi)
+
+    # Per-frame drawing ---------------------------------------------------
+    prev_src = 0
+
+    def draw_frame(plan_idx: int) -> None:
+        nonlocal trace, prev_src
+        src_idx, pose = plan[plan_idx]
+        frame = frames[src_idx]
+        current = in_corridor_frame(frame.sofa, pose)
+        final = in_corridor_frame(final_sofa, pose)
+
+        # Material lost this step stays where it was shaved off and fades.
+        trace = trace * TRACE_DECAY
+        if src_idx != prev_src:
+            lost = np.maximum(frames[src_idx - 1].sofa - frame.sofa, 0.0)
+            trace = np.maximum(trace, in_corridor_frame(lost, pose))
+        prev_src = src_idx
+
+        rgb = background.copy()
+
+        # Drop shadow cast by the remaining block (light from the top-left).
+        shadow = _soft_mask(
+            np.roll(current, (-shadow_off, shadow_off), axis=(0, 1)), shadow_blur
+        )
+        rgb *= 1.0 - SHADOW_ALPHA * (shadow * on_floor)[..., None]
+
+        # Embers: screen blend so the erosion trace glows instead of staining.
+        ember = (_soft_mask(trace, trace_blur) * TRACE_ALPHA)[..., None]
+        rgb = 1.0 - (1.0 - rgb) * (1.0 - ember * GLOW_ORANGE)
+
+        halo = ((current == 1) & (final == 0) & on_floor).astype(np.float32)
+        _blend(rgb, HALO_BLUE, halo * HALO_ALPHA)
+
+        artist.set_data(_downsample(_overlay_sofa(rgb, final, corridor), SUPERSAMPLE))
+        if plan_idx == len(plan) - 1 and show_gerver:
+            readout.set_text(
+                f"final area {frame.area:.3f} · {frame.area / GERVER_AREA:.1%}"
+                " of optimal"
+            )
+        else:
+            readout.set_text(f"step {frame.step:>3} · area {frame.area:.3f}")
+        gauge_fill.set_width(frame.area)
 
     # Encode --------------------------------------------------------------
-    gif_path = output_path.with_suffix(".gif")
-    with tqdm(total=len(frames), desc="Rendering", unit="frame") as pbar:
+    durations = [max(1, round(1000 / (fps * SMOOTH_STEPS)))] * len(plan)
+    durations[0] = HOLD_FIRST_MS
+    durations[-1] = HOLD_LAST_MS
 
-        def render_and_update(frame_idx: int) -> None:
-            draw_frame(frame_idx)
+    gif_path = output_path.with_suffix(".gif")
+    with tqdm(total=len(plan), desc="Rendering", unit="frame") as pbar:
+
+        def render_and_update(plan_idx: int) -> None:
+            draw_frame(plan_idx)
             pbar.update(1)
 
-        _write_streaming_gif(fig, gif_path, fps, len(frames), render_and_update)
+        _write_streaming_gif(fig, gif_path, durations, render_and_update)
 
     plt.close(fig)
     return gif_path

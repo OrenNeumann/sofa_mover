@@ -80,7 +80,6 @@ def main(
                 step,
                 (pose_vals[0], pose_vals[1], pose_vals[2]),
                 sofa.float(),
-                mask,
                 cell_area,
             )
         )

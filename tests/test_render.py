@@ -11,6 +11,7 @@ from PIL import Image
 
 from sofa_mover.training.config import GridConfig
 from sofa_mover.visualization.render import (
+    SMOOTH_STEPS,
     FrameData,
     compute_frame_data,
     render_trajectory,
@@ -36,16 +37,14 @@ class TestComputeFrameData:
         height = sofa_config.grid_size
         sofa = torch.zeros(1, 1, height, height, device=device)
         sofa[:, :, : int(height * fill_fraction), :] = 1.0
-        mask = torch.ones(1, 1, height, height, device=device)
         cell_area = (sofa_config.world_size / sofa_config.grid_size) ** 2
 
-        frame = compute_frame_data(step, pose, sofa, mask, cell_area)
+        frame = compute_frame_data(step, pose, sofa, cell_area)
 
         assert frame.step == step
         assert frame.pose == pose
         assert isinstance(frame.sofa, np.ndarray)
         assert frame.sofa.shape == (height, height)
-        assert frame.corridor_mask.shape == (height, height)
         expected_area = sofa_config.world_size**2 * fill_fraction
         assert frame.area == pytest.approx(expected_area, rel=1e-2)
 
@@ -58,11 +57,8 @@ class TestRenderTrajectory:
     def _uniform_frames(sofa_config: GridConfig, n: int) -> list[FrameData]:
         height = sofa_config.grid_size
         sofa = np.ones((height, height), dtype=np.float32)
-        mask = np.ones((height, height), dtype=np.float32)
         return [
-            FrameData(
-                step=i, pose=(0.0, 0.0, 0.0), sofa=sofa, corridor_mask=mask, area=9.0
-            )
+            FrameData(step=i, pose=(0.0, 0.0, 0.0), sofa=sofa, area=9.0)
             for i in range(n)
         ]
 
@@ -86,4 +82,5 @@ class TestRenderTrajectory:
         assert out_path.exists()
         with Image.open(out_path) as img:
             assert img.format == "GIF"
-            assert img.n_frames == n_frames
+            # SMOOTH_STEPS - 1 interpolated frames between consecutive steps.
+            assert img.n_frames == SMOOTH_STEPS * (n_frames - 1) + 1

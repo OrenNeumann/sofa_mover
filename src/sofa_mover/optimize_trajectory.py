@@ -55,14 +55,13 @@ def actions_to_deltas(
 _RolloutStep = tuple[
     Bool[Tensor, "B 1 H W"],  # sofa after this step's erosion
     Float[Tensor, "B 3"],  # pose after this step
-    Bool[Tensor, "B 1 H W"],  # corridor mask at pose_next
     Float[Tensor, "B"],  # noqa: F821 (jaxtyping dim name) — sofa area
     Bool[Tensor, "B"],  # noqa: F821 (jaxtyping dim name) — at_goal flag
 ]
 
 
 def _rollout(env: SofaEnv, deltas: Float[Tensor, "B T 3"]) -> Iterator[_RolloutStep]:
-    """Yield per-step (sofa, pose, corridor, area, at_goal) for a batched rollout.
+    """Yield per-step (sofa, pose, area, at_goal) for a batched rollout.
 
     Single source of truth for the env dynamics under continuous deltas; both
     batched fitness evaluation and single-trajectory frame collection consume it.
@@ -74,16 +73,14 @@ def _rollout(env: SofaEnv, deltas: Float[Tensor, "B T 3"]) -> Iterator[_RolloutS
     pose = env._initial_pose.unsqueeze(0).expand(B, 3).clone()
     for t in range(T):
         pose_next = pose + deltas[:, t]
-        swept, corridor_next = env.rasterizer.swept_mask(
-            pose, pose_next, cfg.num_substeps
-        )
+        swept, _ = env.rasterizer.swept_mask(pose, pose_next, cfg.num_substeps)
         sofa = sofa & swept
         area = sofa.flatten(1).sum(dim=1, dtype=torch.float32) * env.cell_area
         com = _sofa_com(sofa, env.x_grid, env.y_grid)
         at_goal = (com - _goal_corridor_to_sofa(env.goal_corridor, pose_next)).norm(
             dim=-1
         ) < cfg.goal_radius
-        yield sofa, pose_next, corridor_next, area, at_goal
+        yield sofa, pose_next, area, at_goal
         pose = pose_next
 
 
@@ -97,7 +94,7 @@ def simulate_trajectories(
     discrete dynamics would otherwise pin the optimum to the seed's done-step.
     """
     best = torch.zeros(deltas.shape[0], device=env.device)
-    for _, _, _, area, at_goal in _rollout(env, deltas):
+    for _, _, area, at_goal in _rollout(env, deltas):
         best = torch.maximum(best, area * at_goal.float())
     return best
 
@@ -105,20 +102,15 @@ def simulate_trajectories(
 def _collect_frames(env: SofaEnv, deltas: Float[Tensor, "T 3"]) -> list[FrameData]:
     """Roll a single trajectory and collect FrameData for rendering, stopping at goal."""
     pose0 = env._initial_pose.unsqueeze(0)
-    corridor0 = env.rasterizer.corridor_mask(pose0)
     sofa0 = torch.ones(1, 1, *env.x_grid.shape, dtype=torch.bool, device=env.device)
     frames = [
-        compute_frame_data(
-            0, tuple(pose0[0].tolist()), sofa0.float(), corridor0, env.cell_area
-        )
+        compute_frame_data(0, tuple(pose0[0].tolist()), sofa0.float(), env.cell_area)
     ]
-    for t, (sofa, pose, corridor, _, at_goal) in enumerate(
+    for t, (sofa, pose, _, at_goal) in enumerate(
         _rollout(env, deltas.unsqueeze(0)), start=1
     ):
         frames.append(
-            compute_frame_data(
-                t, tuple(pose[0].tolist()), sofa.float(), corridor, env.cell_area
-            )
+            compute_frame_data(t, tuple(pose[0].tolist()), sofa.float(), env.cell_area)
         )
         if at_goal.item():
             break
@@ -258,6 +250,8 @@ def optimize_trajectory(
         output_path,
         sofa_extent=render_env.sofa_extent,
         corridor_width=config.env.corridor_width,
+        goal_point=config.env.goal_point,
+        goal_radius=config.env.goal_radius,
     )
     torch.save(
         {
