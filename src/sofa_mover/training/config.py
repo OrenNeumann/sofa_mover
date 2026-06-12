@@ -82,13 +82,12 @@ class TrainingConfig:
     env: SofaEnvConfig = field(default_factory=SofaEnvConfig)
     seed: int | None = None
     num_envs: int = 512
-    total_frames: int = 6_000_000
+    total_frames: int = 8_000_000
     rollout_length: int = 64
     num_epochs: int = 4
     minibatch_size: int = 512
     lr: float = 3e-3
-    lr_end_factor: float = 0.1
-    lr_anneal_frames: int | None = 2_000_000
+    lr_end_factor: float = 0.0
     gamma: float = 0.995
     gae_lambda: float = 0.98
     clip_epsilon: float = 0.2

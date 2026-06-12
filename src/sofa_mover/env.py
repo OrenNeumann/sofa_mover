@@ -48,11 +48,9 @@ class SofaEnv(EnvBase):
     the corridor's incremental movement, and everything outside the corridor
     is permanently eroded from the sofa.
 
-    An episode terminates when the sofa's area drops below min_area_fraction
-    of the initial area, and truncates at max_steps. Reaching the goal does
-    not end the episode; the area the sofa had when it first came within
-    goal_radius of the goal (zero if it never did) is paid as a terminal
-    reward at episode end.
+    Done when the sofa's center of mass is within goal_radius of the
+    goal point, or when sofa area drops below min_area_fraction, or at
+    max steps.
     """
 
     batch_locked = True
@@ -160,11 +158,6 @@ class SofaEnv(EnvBase):
         # Episode metric accumulators (reset per episode)
         self._episode_total_angle = torch.zeros(num_envs, 1, device=device)
         self._episode_total_distance = torch.zeros(num_envs, 1, device=device)
-        # Per-episode running max of (area_after when COM is inside the goal
-        # radius). Since erosion only shrinks the sofa, this equals the area at
-        # the first goal-touch; the running max is the branchless batched way
-        # to record it. Same fitness as the CEM optimizer's.
-        self._episode_best_area_at_goal = torch.zeros(num_envs, 1, device=device)
 
         # Boundary ray-casting setup (if enabled)
         if cfg.observation_type == "boundary":
@@ -269,7 +262,6 @@ class SofaEnv(EnvBase):
         self._step_count[reset_mask] = 0
         self._episode_total_angle[reset_mask] = 0.0
         self._episode_total_distance[reset_mask] = 0.0
-        self._episode_best_area_at_goal[reset_mask] = 0.0
         self._goal_dist[reset_mask] = self.initial_goal_dist
 
         # Expand the reset obs across the batch, TorchRL keeps only the reset rows.
@@ -340,23 +332,15 @@ class SofaEnv(EnvBase):
         com = _sofa_com(self._sofa, self.x_grid, self.y_grid)  # (B, 2)
         goal_sofa = _goal_corridor_to_sofa(self.goal_corridor, pose_next)  # (B, 2)
         goal_dist = (com - goal_sofa).norm(dim=-1)  # (B,)
-        at_goal = goal_dist < cfg.goal_radius  # (B,)
-
-        # Track the running max of area-while-at-goal across the episode.
-        area_at_goal_now = area_after * at_goal.float()
-        self._episode_best_area_at_goal = torch.maximum(
-            self._episode_best_area_at_goal, area_at_goal_now.unsqueeze(1)
-        )
-        best_at_goal = self._episode_best_area_at_goal.squeeze(-1)  # (B,)
+        goal_reached = goal_dist < cfg.goal_radius  # (B,)
 
         # Step count
         self._step_count += 1
 
-        # Done conditions — reaching the goal does not terminate; episodes end
-        # only on area death or truncation.
+        # Done conditions
         area_dead = (area_after / self.initial_area) < cfg.min_area_fraction
         truncated = self._step_count.squeeze(1) >= cfg.max_steps
-        terminated = area_dead
+        terminated = goal_reached | area_dead
         done = terminated | truncated
 
         # --- Reward ---
@@ -372,7 +356,7 @@ class SofaEnv(EnvBase):
         )
         # per-step area survival bonus: dense feedback about current area level
         area_step_bonus = cfg.lambda_area_step * area_after / self.initial_area
-        terminal_bonus = done.float() * best_at_goal**3
+        terminal_bonus = goal_reached.float() * area_after**3
         reward = (
             erosion_penalty + progress_bonus + area_step_bonus + terminal_bonus
         ).unsqueeze(1)
@@ -401,7 +385,7 @@ class SofaEnv(EnvBase):
                 "done": done.unsqueeze(1),
                 "terminated": terminated.unsqueeze(1),
                 "truncated": truncated.unsqueeze(1),
-                "terminal_area": (done.float() * best_at_goal).unsqueeze(1),
+                "terminal_area": (goal_reached.float() * area_after).unsqueeze(1),
                 "episode_length": self._step_count.clone(),
                 "episode_total_angle": self._episode_total_angle.clone(),
                 "episode_total_distance": self._episode_total_distance.clone(),
