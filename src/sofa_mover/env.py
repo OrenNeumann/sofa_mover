@@ -171,6 +171,35 @@ class SofaEnv(EnvBase):
             self._reset_sofa_view = self._downscale_obs(init_sofa.to(torch.uint8))
         self._goal_dist = self.initial_goal_dist.expand(num_envs).clone()
 
+        # Constant reset output, built once. _reset returns a shallow copy:
+        # fresh dict structure, shared (never mutated) leaf tensors.
+        zeros = torch.zeros(num_envs, 1, device=device)
+        self._reset_td = TensorDict(
+            {
+                "observation": {
+                    "sofa_view": self._reset_sofa_view.expand(
+                        num_envs, *self._reset_sofa_view.shape[1:]
+                    ),
+                    "pose": self._initial_pose.expand(num_envs, 3),
+                    "progress": zeros,
+                },
+                "done": torch.zeros(num_envs, 1, dtype=torch.bool, device=device),
+                "terminated": torch.zeros(num_envs, 1, dtype=torch.bool, device=device),
+                "truncated": torch.zeros(num_envs, 1, dtype=torch.bool, device=device),
+                "terminal_area": zeros,
+                "episode_length": torch.zeros(
+                    num_envs, 1, dtype=torch.int64, device=device
+                ),
+                "episode_total_angle": zeros,
+                "episode_total_distance": zeros,
+                "reward_erosion": zeros,
+                "reward_progress": zeros,
+                "reward_terminal": zeros,
+            },
+            batch_size=(num_envs,),
+            device=device,
+        )
+
         self._make_specs()
 
     def _downscale_obs(self, obs: torch.Tensor) -> torch.Tensor:
@@ -264,31 +293,9 @@ class SofaEnv(EnvBase):
         self._episode_total_distance[reset_mask] = 0.0
         self._goal_dist[reset_mask] = self.initial_goal_dist
 
-        # Expand the reset obs across the batch, TorchRL keeps only the reset rows.
-        sofa_view = self._reset_sofa_view.expand(B, *self._reset_sofa_view.shape[1:])
-        progress = torch.zeros(B, 1, device=device)
-
-        return TensorDict(
-            {
-                "observation": {
-                    "sofa_view": sofa_view,
-                    "pose": self._pose.clone(),
-                    "progress": progress,
-                },
-                "done": torch.zeros(B, 1, dtype=torch.bool, device=device),
-                "terminated": torch.zeros(B, 1, dtype=torch.bool, device=device),
-                "truncated": torch.zeros(B, 1, dtype=torch.bool, device=device),
-                "terminal_area": torch.zeros(B, 1, device=device),
-                "episode_length": torch.zeros(B, 1, dtype=torch.int64, device=device),
-                "episode_total_angle": torch.zeros(B, 1, device=device),
-                "episode_total_distance": torch.zeros(B, 1, device=device),
-                "reward_erosion": torch.zeros(B, 1, device=device),
-                "reward_progress": torch.zeros(B, 1, device=device),
-                "reward_terminal": torch.zeros(B, 1, device=device),
-            },
-            batch_size=(B,),
-            device=device,
-        )
+        # The reset observation is constant, so only the reset rows of the
+        # returned dict are valid; TorchRL and the collector keep only those.
+        return self._reset_td.copy()
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
         cfg = self.cfg
@@ -398,10 +405,7 @@ class SofaEnv(EnvBase):
         )
 
     def _set_seed(self, seed: int | None) -> None:
-        rng = torch.Generator(device=self.device)
-        if seed is not None:
-            rng.manual_seed(seed)
-        self.rng = rng
+        """No-op: the env is deterministic, randomness lives in the policy."""
 
 
 def make_sofa_env(

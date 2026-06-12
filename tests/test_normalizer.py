@@ -168,7 +168,7 @@ class TestRunningMeanStd:
         rms_2.load_state_dict(state)
         assert torch.allclose(rms.mean, rms_2.mean)
         assert torch.allclose(rms.var, rms_2.var)
-        assert rms.count == pytest.approx(rms_2.count)
+        assert rms.count.item() == pytest.approx(rms_2.count.item())
 
 
 class TestObservationNormalization:
@@ -197,13 +197,30 @@ class TestObservationNormalization:
 
         td = env.reset()
         actor_module(td)
-        counts_before = {name: rms.count for name, rms in normalizer._obs_rms.items()}
+        counts_before = {
+            name: rms.count.item() for name, rms in normalizer._obs_rms.items()
+        }
 
         normalizer.freeze = True
         actor_module(td)
 
         for name, rms in normalizer._obs_rms.items():
-            assert rms.count == pytest.approx(counts_before[name])
+            assert rms.count.item() == pytest.approx(counts_before[name])
+
+    def test_stats_keep_updating_under_torch_compile(self) -> None:
+        """Running stats must keep advancing when normalize_group runs inside
+        compiled code — torch.compile silently drops non-tensor state updates,
+        which froze the stats after warmup and broke training."""
+        normalizer = Normalizer(
+            obs_groups=[ObsGroupSpec("g", 4)],
+            num_envs=1,
+            device=TEST_DEVICE,
+            norm_reward=False,
+        )
+        fn = torch.compile(lambda x: normalizer.normalize_group(x, "g"))
+        for _ in range(6):
+            fn(torch.randn(32, 4))
+        assert normalizer._obs_rms["g"].count.item() == pytest.approx(6 * 32, abs=1.0)
 
     def test_tied_group_normalization_preserves_rotation(self) -> None:
         """Tied stats (scalar mean/std) must produce rotation-equivariant

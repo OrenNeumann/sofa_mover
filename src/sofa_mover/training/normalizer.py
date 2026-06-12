@@ -40,20 +40,19 @@ class NormalizerState:
     ret_rms: RunningMeanStdState | None
 
 
-# TODO: optimize for gpu torch tensors
 class RunningMeanStd:
     """Tracks running mean and variance using Welford's parallel algorithm."""
 
     mean: torch.Tensor
     var: torch.Tensor
-    count: float
+    count: torch.Tensor
 
     def __init__(
         self, shape: tuple[int, ...] = (), device: torch.device = torch.device("cpu")
     ) -> None:
         self.mean = torch.zeros(shape, dtype=torch.float32, device=device)
         self.var = torch.ones(shape, dtype=torch.float32, device=device)
-        self.count = 1e-4
+        self.count = torch.full((), 1e-4, dtype=torch.float32, device=device)
 
     def update(self, batch: torch.Tensor) -> None:
         """Update stats from a batch. Leading dims are treated as batch dims.
@@ -75,26 +74,26 @@ class RunningMeanStd:
     ) -> None:
         delta = batch_mean - self.mean
         total_count = self.count + batch_count
-        new_mean = self.mean + delta * batch_count / total_count
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        m_2 = m_a + m_b + delta.square() * self.count * batch_count / total_count
-        self.mean = new_mean
-        self.var = m_2 / total_count
-        self.count = total_count
+        m_2 = (
+            self.var * self.count
+            + batch_var * batch_count
+            + delta.square() * self.count * batch_count / total_count
+        )
+        self.mean.add_(delta * batch_count / total_count)
+        self.var.copy_(m_2 / total_count)
+        self.count.copy_(total_count)
 
     def state_dict(self) -> RunningMeanStdState:
         return {
             "mean": self.mean.clone(),
             "var": self.var.clone(),
-            "count": self.count,
+            "count": self.count.item(),
         }
 
     def load_state_dict(self, state: RunningMeanStdState) -> None:
-        device = self.mean.device
-        self.mean = state["mean"].to(device=device, dtype=torch.float32)
-        self.var = state["var"].to(device=device, dtype=torch.float32)
-        self.count = float(state["count"])
+        self.mean.copy_(state["mean"])
+        self.var.copy_(state["var"])
+        self.count.fill_(float(state["count"]))
 
 
 class Normalizer:

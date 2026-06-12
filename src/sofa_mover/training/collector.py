@@ -3,10 +3,39 @@
 from collections.abc import Iterator
 
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from sofa_mover.env import SofaEnv
-from sofa_mover.networks import MultiDiscreteCategorical, SofaActorNet
+from sofa_mover.networks import SofaActorNet
+
+
+def _sample_actions(
+    actor_net: SofaActorNet,
+    sofa_view: torch.Tensor,
+    pose: torch.Tensor,
+    progress: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Actor forward + per-axis categorical sample + log-prob, in one graph.
+
+    Sampling uses Gumbel-max (argmax over logits + Gumbel noise), which is
+    equivalent to categorical sampling but compiles into the same graph as
+    the forward pass, unlike Categorical.sample. Must stay equivalent to
+    MultiDiscreteCategorical (enforced by tests).
+    """
+    n_axes = len(actor_net.nvec)
+    n_bins = actor_net.nvec[0]
+    logits = actor_net(sofa_view, pose, progress).view(-1, n_axes, n_bins)
+    log_probs = F.log_softmax(logits, dim=-1)
+    uniform = torch.rand_like(log_probs).clamp_min(1e-20)
+    gumbel = -torch.log(-torch.log(uniform))
+    indices = (log_probs + gumbel).argmax(dim=-1)
+    one_hot = F.one_hot(indices, n_bins).float()
+    log_prob = (log_probs * one_hot).sum(dim=(-2, -1))
+    return one_hot.flatten(-2), log_prob
+
+
+_compiled_sample_actions = torch.compile(_sample_actions)
 
 
 class RolloutCollector:
@@ -37,10 +66,9 @@ class RolloutCollector:
         self.total_frames = total_frames
 
     def _sample_action(self, obs: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = self.actor_net(obs["sofa_view"], obs["pose"], obs["progress"])
-        dist = MultiDiscreteCategorical(logits=logits, nvec=self.actor_net.nvec)
-        action = dist.sample()
-        return action, dist.log_prob(action)
+        return _compiled_sample_actions(
+            self.actor_net, obs["sofa_view"], obs["pose"], obs["progress"]
+        )
 
     def _step_and_reset(self, action: torch.Tensor) -> tuple[TensorDict, TensorDict]:
         """Step the env, reset done rows, return (step result, merged next obs)."""

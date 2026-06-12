@@ -185,6 +185,27 @@ class TestGoalDetection:
                 break
         assert td["done"].all()
 
+    def test_goal_reach_terminates_and_pays_cubic_bonus(self) -> None:
+        """The step that reaches the goal ends the episode and its reward
+        includes the cubic area bonus (paid at goal-touch, not later)."""
+        # goal_radius=10 guarantees goal reach on the first step
+        cfg = _test_cfg(goal_radius=10.0)
+        env = make_sofa_env(
+            total_frames=TEST_TOTAL_FRAMES,
+            num_envs=1,
+            cfg=cfg,
+            device=TEST_DEVICE,
+        )
+        td = env.reset()
+        td["action"] = _noop_action(1)
+        td = env.step(td)["next"]
+        assert td["terminated"].all()
+        # A noop erodes nothing and makes no progress, so the only rewards
+        # are the per-step area bonus and the terminal area³ payout.
+        area = td["terminal_area"][0].item()
+        expected = cfg.lambda_area_step + area**3
+        assert td["reward"][0].item() == pytest.approx(expected, rel=1e-4)
+
     def test_progress_increases_toward_goal(self) -> None:
         """Moving toward the goal should increase progress."""
         cfg = _test_cfg(delta_xy=0.3, delta_theta=math.pi / 8)
