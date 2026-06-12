@@ -80,6 +80,7 @@ class TrainingConfig:
     """Public training configuration."""
 
     env: SofaEnvConfig = field(default_factory=SofaEnvConfig)
+    seed: int | None = None
     num_envs: int = 512
     total_frames: int = 6_000_000
     rollout_length: int = 64

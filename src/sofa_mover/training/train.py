@@ -1,5 +1,6 @@
 """Run PPO training for the sofa moving problem."""
 
+import os
 import time
 from pathlib import Path
 
@@ -23,7 +24,12 @@ from sofa_mover.training.utils import (
 
 
 def main() -> None:
+    # Let the CUDA allocator grow VRAM in small increments.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
     config = TrainingConfig()
+    if config.seed is not None:
+        torch.manual_seed(config.seed)
     output_path = Path(config.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     run = wandb_init(project=config.wandb_project)

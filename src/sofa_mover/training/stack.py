@@ -5,10 +5,10 @@ from dataclasses import dataclass
 
 import torch
 from tensordict.nn import TensorDictModule
-from torchrl.collectors import Collector
 from torchrl.modules import ProbabilisticActor, ValueOperator
 
 from sofa_mover.env import SofaEnv, make_sofa_env
+from sofa_mover.training.collector import RolloutCollector
 from sofa_mover.networks import (
     MultiDiscreteCategorical,
     SofaActorNet,
@@ -31,7 +31,7 @@ class TrainingStack:
     critic: ValueOperator
     optimizer: torch.optim.Optimizer
     lr_scheduler: torch.optim.lr_scheduler.LinearLR
-    collector: Collector
+    collector: RolloutCollector
 
 
 def build_actor(
@@ -124,12 +124,11 @@ def build_training_stack(
     )
 
     # --- Collector ---
-    collector = Collector(
-        create_env_fn=env,
-        policy=actor,
-        frames_per_batch=num_envs * config.rollout_length,
+    collector = RolloutCollector(
+        env=env,
+        actor_net=actor_net,
+        rollout_length=config.rollout_length,
         total_frames=config.total_frames,
-        device=device,
     )
 
     return TrainingStack(

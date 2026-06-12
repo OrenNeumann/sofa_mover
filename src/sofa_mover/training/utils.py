@@ -9,13 +9,16 @@ import torch.nn.functional as F
 from tensordict import TensorDictBase
 
 from sofa_mover.env import SofaEnv
-from sofa_mover.networks import MultiDiscreteCategorical, SofaActorNet, SofaCriticNet
+from sofa_mover.networks import SofaActorNet, SofaCriticNet
 from sofa_mover.visualization.render import build_composite
 
 # TensorDict keys set by TorchRL's ProbabilisticActor / used by GAE computation
 _ADV_KEY = "advantage"
 _VT_KEY = "value_target"
 _SAMPLE_LOG_PROB_KEY = "action_log_prob"
+
+# Rows per critic call in compute_gae_direct.
+_GAE_CHUNK = 8192
 
 
 @dataclass(frozen=True)
@@ -73,7 +76,16 @@ def compute_gae_direct(
             [obs["progress"].flatten(0, 1), next_obs["progress"].flatten(0, 1)]
         )
 
-        all_values = critic_net(all_sv, all_p, all_pr)  # (2*B*T, 1)
+        all_values = torch.cat(
+            [
+                critic_net(view, pose, progress)
+                for view, pose, progress in zip(
+                    all_sv.split(_GAE_CHUNK),
+                    all_p.split(_GAE_CHUNK),
+                    all_pr.split(_GAE_CHUNK),
+                )
+            ]
+        )  # (2*B*T, 1)
         values, next_values = all_values.reshape(2, B, T, 1).unbind(0)
 
         reward = data["next", "reward"]  # (B, T, 1)
@@ -95,6 +107,65 @@ def compute_gae_direct(
     data.set(_VT_KEY, advantages + values)
 
 
+def _minibatch_losses(
+    actor_net: SofaActorNet,
+    critic_head: torch.nn.Module,
+    sofa_view: torch.Tensor,
+    pose: torch.Tensor,
+    progress: torch.Tensor,
+    action: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    advantage: torch.Tensor,
+    value_target: torch.Tensor,
+    clip_epsilon: float,
+    entropy_coeff: float,
+    critic_coeff: float,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
+    """One PPO minibatch forward: all losses plus KL/clip diagnostics.
+
+    Runs under torch.compile, so the log_prob/entropy math is written out
+    here instead of calling MultiDiscreteCategorical. The two must stay
+    equivalent (enforced by a test).
+
+    Returns ``(loss, loss_policy, loss_critic, loss_entropy, approx_kl,
+    clip_fraction)``.
+    """
+    n_axes = len(actor_net.nvec)
+    n_bins = actor_net.nvec[0]
+    features = actor_net.encoder(sofa_view, pose, progress)
+    logits = actor_net.head(features).view(-1, n_axes, n_bins)
+    log_probs = F.log_softmax(logits, dim=-1)
+    # action is concatenated one-hot, so a dot product extracts the per-axis
+    # chosen log-prob (equivalent to argmax + gather).
+    action_one_hot = action.view(-1, n_axes, n_bins)
+    new_log_prob = (log_probs * action_one_hot).sum(dim=(-2, -1))
+    entropy = -(log_probs.exp() * log_probs).sum(dim=(-2, -1))
+
+    values = critic_head(features).squeeze(-1)
+
+    log_ratio = new_log_prob - old_log_prob.squeeze(-1)
+    ratio = torch.exp(log_ratio)
+    # Schulman's k3 approx-KL estimator: E[(r-1) - log r], unbiased + non-negative.
+    with torch.no_grad():
+        approx_kl = ((ratio - 1.0) - log_ratio).mean()
+        clip_fraction = (ratio - 1.0).abs().gt(clip_epsilon).float().mean()
+    adv = advantage.squeeze(-1)
+    surr1 = ratio * adv
+    surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * adv
+    loss_policy = -torch.min(surr1, surr2).mean()
+    loss_critic = critic_coeff * F.mse_loss(values, value_target.squeeze(-1))
+    loss_entropy = -entropy_coeff * entropy.mean()
+    loss = loss_policy + loss_critic + loss_entropy
+    return loss, loss_policy, loss_critic, loss_entropy, approx_kl, clip_fraction
+
+
+# Default mode only: "reduce-overhead" (CUDA graphs) allocates private memory
+# pools that OOM the 6 GB card under host VRAM contention.
+_compiled_minibatch_losses = torch.compile(_minibatch_losses)
+
+
 def optimize_ppo_epochs(
     data_flat: TensorDictBase,
     actor_net: SofaActorNet,
@@ -114,7 +185,6 @@ def optimize_ppo_epochs(
     Calls the shared encoder once per minibatch (not twice as separate
     actor/critic forward passes would).
     """
-    nvec = actor_net.nvec
     N = data_flat.shape[0]
 
     # Extract all relevant tensors from the TensorDict once (outside the epoch
@@ -130,10 +200,6 @@ def optimize_ppo_epochs(
     # (e.g. first goal-reaches with the cubic terminal reward).
     advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
     value_target = data_flat[_VT_KEY]
-
-    encoder = actor_net.encoder
-    actor_head = actor_net.head
-    critic_head = critic_net.head
 
     # Accumulate scalar stats on-GPU across all minibatches and materialize once
     loss_pol_sum = torch.zeros((), device=device)
@@ -164,35 +230,27 @@ def optimize_ppo_epochs(
         for mb_start in range(0, N, minibatch_size):
             mb_end = min(mb_start + minibatch_size, N)
 
-            # Encoder called ONCE — shared features for actor and critic heads.
-            features = encoder(
+            (
+                loss,
+                loss_pol,
+                loss_crit,
+                loss_ent,
+                approx_kl_mb,
+                clip_frac_mb,
+            ) = _compiled_minibatch_losses(
+                actor_net,
+                critic_net.head,
                 sv_s[mb_start:mb_end],
                 pose_s[mb_start:mb_end],
                 prog_s[mb_start:mb_end],
+                act_s[mb_start:mb_end],
+                olp_s[mb_start:mb_end],
+                adv_s[mb_start:mb_end],
+                vt_s[mb_start:mb_end],
+                clip_epsilon,
+                entropy_coeff,
+                critic_coeff,
             )
-
-            logits = actor_head(features)
-            dist = MultiDiscreteCategorical(logits=logits, nvec=nvec)
-            new_log_prob = dist.log_prob(act_s[mb_start:mb_end])
-            entropy = dist.entropy()
-
-            values = critic_head(features).squeeze(-1)
-
-            log_ratio = new_log_prob - olp_s[mb_start:mb_end].squeeze(-1)
-            ratio = torch.exp(log_ratio)
-            # Schulman's k3 approx-KL estimator: E[(r-1) - log r], unbiased + non-negative.
-            with torch.no_grad():
-                approx_kl_mb = ((ratio - 1.0) - log_ratio).mean()
-                clip_frac_mb = (ratio - 1.0).abs().gt(clip_epsilon).float().mean()
-            adv_mb = adv_s[mb_start:mb_end].squeeze(-1)
-            surr1 = ratio * adv_mb
-            surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * adv_mb
-            loss_pol = -torch.min(surr1, surr2).mean()
-            loss_crit = critic_coeff * F.mse_loss(
-                values, vt_s[mb_start:mb_end].squeeze(-1)
-            )
-            loss_ent = -entropy_coeff * entropy.mean()
-            loss = loss_pol + loss_crit + loss_ent
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()

@@ -54,25 +54,25 @@ def _analytical_swept_mask(
 ) -> tuple[Bool[Tensor, "B 1 H W"], Bool[Tensor, "B 1 H W"]]:
     """Compute swept corridor mask between two poses via analytical check.
 
-    Samples num_substeps intermediate poses (excluding previous, including next),
-    computes corridor masks analytically, and returns their element-wise minimum.
+    Samples num_substeps intermediate poses (excluding previous, including
+    next) and ANDs their corridor masks. The loop accumulates one substep at
+    a time so that under torch.compile it fuses into a single kernel instead
+    of materializing every substep's mask.
     """
-    B = pose_prev.shape[0]
-    device = pose_prev.device
-    H, W = x_grid.shape
+    delta = pose_next - pose_prev
 
     # t values: exclude 0 (previous pose already applied), include 1 (target)
-    t_values = torch.linspace(0.0, 1.0, num_substeps + 1, device=device)[1:]
+    mask = _analytical_corridor_mask(
+        pose_prev + (1.0 / num_substeps) * delta, x_grid, y_grid, rect_bounds
+    )
+    swept = mask
+    for substep in range(2, num_substeps + 1):
+        mask = _analytical_corridor_mask(
+            pose_prev + (substep / num_substeps) * delta, x_grid, y_grid, rect_bounds
+        )
+        swept = swept & mask
 
-    delta = pose_next - pose_prev
-    all_poses = pose_prev.unsqueeze(0) + t_values[:, None, None] * delta.unsqueeze(0)
-    all_poses_flat = all_poses.reshape(-1, 3)
-
-    masks_flat = _analytical_corridor_mask(all_poses_flat, x_grid, y_grid, rect_bounds)
-    masks = masks_flat.reshape(num_substeps, B, 1, H, W)
-
-    swept = masks.all(dim=0)  # pixel kept iff inside corridor at every substep
-    corridor_at_next = masks[-1]
+    corridor_at_next = mask
     return swept, corridor_at_next
 
 

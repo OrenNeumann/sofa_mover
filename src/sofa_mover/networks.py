@@ -33,30 +33,39 @@ class SofaPolicyEncoder(Protocol):
 class MultiDiscreteCategorical(torch.distributions.Distribution):
     """Independent Categoricals over a concatenated one-hot action vector.
 
-    Each axis is sampled independently; log_prob and entropy are sums across axes.
+    Each axis is sampled independently; log_prob and entropy are sums across
+    axes. All axes must have the same number of bins, so they can be batched
+    as one Categorical over (..., n_axes, n_bins).
 
     Args:
-        logits: Concatenated logits of shape (..., sum(nvec)).
-        nvec: Number of bins per axis.
+        logits: Concatenated logits, shape (..., sum(nvec)).
+        nvec: Number of bins per axis (all equal).
     """
 
     has_enumerate_support = False
     has_rsample = False
+    arg_constraints: dict[str, torch.distributions.constraints.Constraint] = {}
 
     def __init__(self, logits: Tensor, nvec: list[int]) -> None:
+        n_bins = nvec[0]
+        assert all(n == n_bins for n in nvec), f"axes must have equal bins: {nvec}"
         self.nvec = nvec
-        split_logits = logits.split(nvec, dim=-1)
-        self._dists = [
-            torch.distributions.Categorical(logits=lg) for lg in split_logits
-        ]
+        self.n_axes = len(nvec)
+        self.n_bins = n_bins
+        self._dist = torch.distributions.Categorical(
+            logits=logits.reshape(*logits.shape[:-1], self.n_axes, n_bins)
+        )
         super().__init__(batch_shape=logits.shape[:-1])
+
+    def _indices_to_onehot(self, indices: Tensor) -> Tensor:
+        """(..., n_axes) bin indices -> (..., n_axes*n_bins) concatenated one-hot."""
+        one_hot = F.one_hot(indices, self.n_bins).float()
+        return one_hot.flatten(-2)
 
     def sample(
         self, sample_shape: torch.Size | list[int] | tuple[int, ...] = torch.Size()
     ) -> Tensor:
-        indices = [d.sample(sample_shape) for d in self._dists]
-        one_hots = [F.one_hot(i, n).float() for i, n in zip(indices, self.nvec)]
-        return torch.cat(one_hots, dim=-1)
+        return self._indices_to_onehot(self._dist.sample(sample_shape))
 
     def rsample(
         self, sample_shape: torch.Size | list[int] | tuple[int, ...] = torch.Size()
@@ -65,23 +74,18 @@ class MultiDiscreteCategorical(torch.distributions.Distribution):
 
     def log_prob(self, action: Tensor) -> Tensor:
         """action: (..., sum(nvec)) concatenated one-hot (float or bool)."""
-        split_actions = action.split(self.nvec, dim=-1)
-        indices = [a.argmax(dim=-1) for a in split_actions]
-        log_probs = torch.stack(
-            [d.log_prob(i) for d, i in zip(self._dists, indices)], dim=-1
+        indices = action.reshape(*action.shape[:-1], self.n_axes, self.n_bins).argmax(
+            dim=-1
         )
-        return log_probs.sum(dim=-1)
+        return self._dist.log_prob(indices).sum(dim=-1)
 
     def entropy(self) -> Tensor:
-        entropies = torch.stack([d.entropy() for d in self._dists], dim=-1)
-        return entropies.sum(dim=-1)
+        return self._dist.entropy().sum(dim=-1)
 
     @property
     def mode(self) -> Tensor:
         """Greedy (mode) action: argmax per axis, returned as concatenated one-hot."""
-        modes = [d.logits.argmax(dim=-1) for d in self._dists]
-        one_hots = [F.one_hot(m, n).float() for m, n in zip(modes, self.nvec)]
-        return torch.cat(one_hots, dim=-1)
+        return self._indices_to_onehot(self._dist.logits.argmax(dim=-1))
 
     @property
     def mean(self) -> Tensor:

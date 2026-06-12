@@ -5,9 +5,15 @@ import torch
 from tensordict import TensorDict
 
 from sofa_mover.env import make_sofa_env
-from sofa_mover.networks import SofaCriticNet
+from sofa_mover.networks import (
+    BoundaryEncoder,
+    MultiDiscreteCategorical,
+    SofaActorNet,
+    SofaCriticNet,
+)
 from sofa_mover.training.config import SofaEnvConfig
 from sofa_mover.training.utils import (
+    _minibatch_losses,
     compute_gae_direct,
     extract_episode_metrics,
     maybe_build_episode_composite,
@@ -72,6 +78,51 @@ def test_compute_gae_direct(terminated: bool, expected_adv: list[float]) -> None
     torch.testing.assert_close(data["advantage"], expected)
     values = torch.tensor([1.0, 2.0, 3.0]).reshape(1, 3, 1)
     torch.testing.assert_close(data["value_target"], expected + values)
+
+
+def test_minibatch_losses_match_distribution_class() -> None:
+    """_minibatch_losses inlines MultiDiscreteCategorical's math; keep them equal."""
+    torch.manual_seed(0)
+    nvec = [5, 5, 5]
+    encoder = BoundaryEncoder(n_rays=16, feature_dim=32, width=32, depth=1)
+    actor_net = SofaActorNet(nvec=nvec, encoder=encoder, width=32, depth=1)
+    critic_head = torch.nn.Linear(32, 1)
+
+    B = 32
+    sofa_view, pose, progress = torch.rand(B, 16), torch.randn(B, 3), torch.rand(B, 1)
+    advantage, value_target = torch.randn(B, 1), torch.randn(B, 1)
+    clip_epsilon, entropy_coeff = 0.2, 0.01
+    with torch.no_grad():
+        dist = MultiDiscreteCategorical(
+            logits=actor_net(sofa_view, pose, progress), nvec=nvec
+        )
+        action = dist.sample()
+        old_log_prob = dist.log_prob(action) - 0.1  # offset for non-trivial ratios
+
+    _, loss_policy, _, loss_entropy, approx_kl, _ = _minibatch_losses(
+        actor_net,
+        critic_head,
+        sofa_view,
+        pose,
+        progress,
+        action,
+        old_log_prob,
+        advantage,
+        value_target,
+        clip_epsilon,
+        entropy_coeff,
+        critic_coeff=1.0,
+    )
+
+    ratio = torch.exp(dist.log_prob(action) - old_log_prob)
+    surr1 = ratio * advantage.squeeze(-1)
+    surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantage.squeeze(
+        -1
+    )
+    torch.testing.assert_close(loss_policy, -torch.min(surr1, surr2).mean())
+    torch.testing.assert_close(loss_entropy, -entropy_coeff * dist.entropy().mean())
+    expected_kl = ((ratio - 1.0) - ratio.log()).mean()
+    torch.testing.assert_close(approx_kl, expected_kl)
 
 
 def test_extract_episode_metrics_returns_none_when_no_done() -> None:
