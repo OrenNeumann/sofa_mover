@@ -50,10 +50,10 @@ def main() -> None:
     total_steps = 0
     training_start = time.perf_counter()
 
-    def checkpoint_payload(include_encoder: bool) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "actor": dict(stack.actor.state_dict()),
-            "critic": dict(stack.critic.state_dict()),
+    def checkpoint_payload() -> dict[str, object]:
+        return {
+            "actor": stack.actor_net.state_dict(),
+            "critic": stack.critic_net.state_dict(),
             "vec_normalize": normalizer.state_dict(),
             "config": config,
             "batch_idx": batch_idx,
@@ -61,9 +61,6 @@ def main() -> None:
             "best_trajectory_actions": best_tracker.best_actions,
             "best_trajectory_area": best_tracker.best_area,
         }
-        if include_encoder:
-            payload["encoder"] = dict(stack.actor_net.encoder.state_dict())
-        return payload
 
     pbar = tqdm(
         total=config.total_frames,
@@ -169,10 +166,7 @@ def main() -> None:
             and episode_metrics.best_area_at_goal > best_area_so_far
         ):
             best_area_so_far = episode_metrics.best_area_at_goal
-            torch.save(
-                checkpoint_payload(include_encoder=False),
-                output_path / "best_policy.pt",
-            )
+            torch.save(checkpoint_payload(), output_path / "best_policy.pt")
 
         pbar.update(batch_frames)
         batch_idx += 1
@@ -182,7 +176,7 @@ def main() -> None:
     stack.collector.shutdown()
 
     final_path = output_path / "final_policy.pt"
-    torch.save(checkpoint_payload(include_encoder=True), final_path)
+    torch.save(checkpoint_payload(), final_path)
     print(f"Training complete. Best area at goal: {best_area_so_far:.4f}")
     print(f"Saved to {final_path}")
 

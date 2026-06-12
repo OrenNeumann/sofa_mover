@@ -15,10 +15,9 @@ import torch
 from tensordict import TensorDictBase
 
 from sofa_mover.env import SofaEnv, make_sofa_env
-from sofa_mover.networks import MultiDiscreteCategorical
+from sofa_mover.networks import MultiDiscreteCategorical, build_actor_net
 from sofa_mover.training.config import DEVICE, TrainingConfig
 from sofa_mover.training.normalizer import Normalizer
-from sofa_mover.training.stack import build_actor
 from sofa_mover.visualization.render import (
     FrameData,
     compute_frame_data,
@@ -82,15 +81,16 @@ def evaluate(
     normalizer.freeze = True
     normalizer.load_state_dict(checkpoint["vec_normalize"])
 
-    _, actor_module, actor = build_actor(training_config, normalizer, device)
-    actor.load_state_dict(checkpoint["actor"])
-    actor.eval()
+    actor_net = build_actor_net(training_config, normalizer).to(device)
+    actor_net.load_state_dict(checkpoint["actor"])
+    actor_net.eval()
 
     out = Path(output_path)
     out.parent.mkdir(exist_ok=True)
 
     def greedy_action(td: TensorDictBase, step: int) -> torch.Tensor:
-        logits = actor_module(td)["logits"]
+        obs = td["observation"]
+        logits = actor_net(obs["sofa_view"], obs["pose"], obs["progress"])
         return MultiDiscreteCategorical(logits=logits, nvec=cfg.nvec).mode
 
     greedy_frames = _rollout(env, greedy_action, cfg.max_steps)

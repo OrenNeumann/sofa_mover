@@ -12,7 +12,7 @@ from sofa_mover.env import SofaEnv
 from sofa_mover.networks import SofaActorNet, SofaCriticNet
 from sofa_mover.visualization.render import build_composite
 
-# TensorDict keys set by TorchRL's ProbabilisticActor / used by GAE computation
+# TensorDict keys set by the collector / used by GAE computation
 _ADV_KEY = "advantage"
 _VT_KEY = "value_target"
 _SAMPLE_LOG_PROB_KEY = "action_log_prob"

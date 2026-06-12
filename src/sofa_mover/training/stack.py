@@ -4,17 +4,10 @@ import itertools
 from dataclasses import dataclass
 
 import torch
-from tensordict.nn import TensorDictModule
-from torchrl.modules import ProbabilisticActor, ValueOperator
 
 from sofa_mover.env import SofaEnv, make_sofa_env
 from sofa_mover.training.collector import RolloutCollector
-from sofa_mover.networks import (
-    MultiDiscreteCategorical,
-    SofaActorNet,
-    SofaCriticNet,
-    build_encoder,
-)
+from sofa_mover.networks import SofaActorNet, SofaCriticNet, build_actor_net
 from sofa_mover.training.normalizer import Normalizer
 from sofa_mover.training.config import TrainingConfig
 
@@ -27,51 +20,15 @@ class TrainingStack:
     normalizer: Normalizer
     actor_net: SofaActorNet
     critic_net: SofaCriticNet
-    actor: ProbabilisticActor
-    critic: ValueOperator
     optimizer: torch.optim.Optimizer
     lr_scheduler: torch.optim.lr_scheduler.LinearLR
     collector: RolloutCollector
 
 
-def build_actor(
-    config: TrainingConfig,
-    normalizer: Normalizer | None,
-    device: torch.device,
-) -> tuple[SofaActorNet, TensorDictModule, ProbabilisticActor]:
-    """Build the actor net and its TorchRL wrappers."""
-    nvec = config.env.nvec
-    encoder = build_encoder(config, normalizer)
-    actor_net = SofaActorNet(
-        nvec=nvec,
-        encoder=encoder,
-        width=config.head_width,
-        depth=config.head_depth,
-    ).to(device)
-    actor_module = TensorDictModule(
-        actor_net,
-        in_keys=[
-            ("observation", "sofa_view"),
-            ("observation", "pose"),
-            ("observation", "progress"),
-        ],
-        out_keys=["logits"],
-    )
-    actor = ProbabilisticActor(
-        module=actor_module,
-        in_keys=["logits"],
-        out_keys=["action"],
-        distribution_class=MultiDiscreteCategorical,
-        distribution_kwargs={"nvec": nvec},
-        return_log_prob=True,
-    )
-    return actor_net, actor_module, actor
-
-
 def build_training_stack(
     config: TrainingConfig,
 ) -> TrainingStack:
-    """Build env, modules, loss, optimizer, and collector."""
+    """Build env, networks, optimizer, and collector."""
     device = config.device
     num_envs = config.num_envs
 
@@ -85,22 +42,12 @@ def build_training_stack(
     normalizer = Normalizer.from_config(config, num_envs)
 
     # --- Networks (encoder selected from cfg, shared between actor & critic) ---
-    actor_net, _, actor = build_actor(config, normalizer, device)
+    actor_net = build_actor_net(config, normalizer).to(device)
     critic_net = SofaCriticNet(
         encoder=actor_net.encoder,
         width=config.head_width,
         depth=config.head_depth,
     ).to(device)
-
-    # Wrap critic for TorchRL
-    critic = ValueOperator(
-        module=critic_net,
-        in_keys=[
-            ("observation", "sofa_view"),
-            ("observation", "pose"),
-            ("observation", "progress"),
-        ],
-    )
 
     # --- Optimizer + LR schedule ---
     # actor_net.parameters() covers encoder + actor head;
@@ -130,8 +77,6 @@ def build_training_stack(
         normalizer=normalizer,
         actor_net=actor_net,
         critic_net=critic_net,
-        actor=actor,
-        critic=critic,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         collector=collector,

@@ -311,7 +311,6 @@ class SofaEnv(EnvBase):
         delta = torch.stack([dx, dy, dtheta], dim=-1)  # (B, 3)
 
         # Accumulate episode metrics
-        dx, dy, dtheta = delta[:, 0], delta[:, 1], delta[:, 2]
         self._episode_total_distance += torch.sqrt(dx * dx + dy * dy).unsqueeze(1)
         self._episode_total_angle += dtheta.abs().unsqueeze(1)
 

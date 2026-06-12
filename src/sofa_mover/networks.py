@@ -389,3 +389,16 @@ class SofaCriticNet(nn.Module):
     ) -> Float[Tensor, "*batch 1"]:
         features = self.encoder(sofa_view, pose, progress)
         return self.head(features)
+
+
+def build_actor_net(
+    config: TrainingConfig,
+    normalizer: Normalizer | None,
+) -> SofaActorNet:
+    """Construct the actor net (with its encoder) selected by `config`."""
+    return SofaActorNet(
+        nvec=config.env.nvec,
+        encoder=build_encoder(config, normalizer),
+        width=config.head_width,
+        depth=config.head_depth,
+    )
