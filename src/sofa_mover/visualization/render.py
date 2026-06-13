@@ -61,6 +61,8 @@ TRACE_ALPHA = 0.5
 # Frame durations (ms): linger on the intact block and on the solved sofa.
 HOLD_FIRST_MS = 1200
 HOLD_LAST_MS = 3000
+# Slow the whole gif down.
+SLOWDOWN = 1.5
 
 # World width spanned by one full repeat of the floor texture.
 FLOOR_TILE_WORLD_SIZE_X: float = 4.5
@@ -514,7 +516,7 @@ def render_trajectory(
             )
         )
 
-    fig.text(0.05, 0.94, " ".join("THE MOVING SOFA"), fontsize=11, color="0.8")
+    fig.text(0.05, 0.94, " ".join("SOFA MOVER"), fontsize=11, color="0.8")
     readout = fig.text(
         0.95,
         0.94,
@@ -607,6 +609,7 @@ def render_trajectory(
     durations = [max(1, round(1000 / (fps * SMOOTH_STEPS)))] * len(plan)
     durations[0] = HOLD_FIRST_MS
     durations[-1] = HOLD_LAST_MS
+    durations = [round(d * SLOWDOWN) for d in durations]
 
     gif_path = output_path.with_suffix(".gif")
     with tqdm(total=len(plan), desc="Rendering", unit="frame") as pbar:
