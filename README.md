@@ -7,7 +7,7 @@
 
 A reinforcement learning environment for solving the Sofa-Moving Problem.
 
-![Best learned policy](assets/best_policy.gif)
+<p align="center"><img src="assets/best_policy.gif" alt="Best learned policy" width="486"></p>
 
 
 ## Training
